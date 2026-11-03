@@ -6,7 +6,7 @@
 | Branch | `feat/19-production-deploy` |
 | Depends on | All previous phases merged to `main` |
 | Effort (solo dev + Claude Code) | ~3–4 days (+ ongoing ops) |
-| New env vars | `SENTRY_DSN`, `PREVIEW_ORIGIN` (if not already set); every canonical var gets a production value |
+| New env vars | `SENTRY_DSN`, `PREVIEW_ORIGIN`, `DATABASE_URL_DIRECT`, `GENERATION_DISABLED` (if not already set); every canonical var gets a production value |
 
 ## Goal
 Run AppBuilding in production with a custom domain: the web app, a separate long-running worker, managed Postgres, object storage, and every third-party integration pointed at production URLs. Add the operational basics (error tracking, logs, rate limits, backups, spend alerts, rollback) so the platform can take real users safely.
@@ -15,6 +15,12 @@ Run AppBuilding in production with a custom domain: the web app, a separate long
 - **Two services, not one.** The video deploys only the Next.js app to Vercel and relies on CloudHike Jobs calling back into it. Our agent, builds and exports run in a **worker** (`02-architecture.md` §6) with no request timeout, `eas-cli`, Chromium and a writable temp disk. That's a Railway/Fly/Render service, not a serverless function.
 - **Migrations are a release step.** We don't run `db:push` from a laptop. We generate SQL migrations (`drizzle-kit generate`) during development and apply them (`drizzle-kit migrate`) in CI before the new code goes live.
 - **Separate dev and prod everywhere.** The video runs on its provider's production environment from the start. We keep separate OAuth apps, Stripe modes, buckets, DBs and Anthropic API keys per environment, so testing never touches real users or real money.
+- **Reference app notes** (`13-reference-implementation.md` §3–§4)
+  - **No tunnel in any environment.** The reference app's job service refused localhost, so dev needed `JOBS_PUBLIC_URL` pointing at an ngrok tunnel. That caused HMR WebSocket failures through the tunnel and a render loop that hammered the dev server through ngrok 1,000+ times. Our worker pulls jobs from Postgres, so none of that applies. Tunnels are only for testing inbound third-party webhooks (Stripe/EAS) locally.
+  - **Builds progress whether or not anyone is watching.** In the reference app, an unwatched build "shows as building until the workspace is opened again". Our worker plus webhooks make that a non-issue, but monitor stuck runs anyway (§6).
+  - **`.gitignore` generated output.** The reference app's repo picked up 10K+ files of Expo build/export output (`.mjs` bundles). Ignore every scratch/output dir the worker or local testing produces (step 1b).
+  - **Publish generated apps from production.** A backend-connected app's API base URL comes from `NEXT_PUBLIC_APP_URL`, so apps published from localhost can't reach their data (Phase 16).
+  - **OAuth state cookies are per origin.** Open the workspace at exactly `NEXT_PUBLIC_APP_URL` (not a preview URL or `www.` variant) when connecting backends/GitHub, and register that exact callback URL.
 - **Public URL vars set deliberately.** The video had to delete and re-create `NEXT_PUBLIC_APP_URL` because it was stored as a sensitive value. `NEXT_PUBLIC_*` values are inlined at **build** time and aren't secrets: store them as plain vars and **redeploy** after changing them.
 
 ## Steps
@@ -29,25 +35,30 @@ Run AppBuilding in production with a custom domain: the web app, a separate long
 | Email | Transactional provider | Invites (Phase 14), auth verification |
 | Errors | Sentry (web + worker) | `SENTRY_DSN`, environment tag, release = git sha |
 
+### 1b. Repository hygiene
+- Root `.gitignore`: `node_modules`, `.next`, `.env*` (except `.env.example`), `public/preview-runtime/*.js` (build output), `tmp/`, `.exports/`, `*.tgz`, `dist/`, `web-build/`, `.expo/`, `*.jks`, `credentials.json`, Playwright reports. Add a CI check that fails if the PR adds more than ~500 files or any file under these paths.
+
 ### 2. Environment variables checklist
 Set per environment (dev / prod). **W** = web, **K** = worker.
 
 | Var | W | K | Notes |
 |---|---|---|---|
-| `DATABASE_URL` | ✅ | ✅ | worker: direct connection |
+| `DATABASE_URL` | ✅ | ✅ | pooled is fine for plain queries on serverless web |
+| `DATABASE_URL_DIRECT` | ✅ | ✅ | **direct/session-mode** connection: pg-boss (worker), SSE `LISTEN` (web), migrations (CI). Optional if `DATABASE_URL` is already direct |
 | `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` | ✅ | | URL = prod origin |
 | `NEXT_PUBLIC_APP_URL` | ✅ | ✅ | worker uses it for webhook/callback URLs; rebuild web after change |
 | `GOOGLE_CLIENT_ID/SECRET`, `GITHUB_LOGIN_CLIENT_ID/SECRET` | ✅ | | prod OAuth clients |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | ✅ | ✅ | |
-| `ANTHROPIC_API_KEY`, `AI_MODEL` | | ✅ | separate prod API key/workspace with its own spend limit |
-| `MAX_SCREENS_DEFAULT`, `AGENT_MAX_TURNS`, `AGENT_MAX_FIX_ITERATIONS`, `AGENT_SCREEN_CONCURRENCY` | ✅ | ✅ | |
+| `ANTHROPIC_API_KEY`, `AI_MODEL`, `AI_BUILDER_MODEL` | | ✅ | separate prod API key/workspace with its own spend limit; Planner vs generator model (`05` §1) |
+| `MAX_SCREENS_DEFAULT`, `AGENT_SCREEN_CONCURRENCY` | ✅ | ✅ | screen cap for first plans; parallel screen steps |
 | `ENCRYPTION_KEY`, `ENCRYPTION_KEY_VERSION` | ✅ | ✅ | **same** values on both; backed up in a secret manager |
 | `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` | ✅ | ✅ | prod GitHub App |
-| `IMAGEKIT_URL_ENDPOINT`, `IMAGEKIT_PRIVATE_KEY` | ✅ | ✅ | |
+| `IMAGEKIT_ENABLED`, `IMAGEKIT_URL_ENDPOINT`, `IMAGEKIT_PRIVATE_KEY` | ✅ | ✅ | generators write ImageKit URLs only when enabled (`06` §7) |
 | `BACKEND_PROVIDER`, `BACKEND_OAUTH_CLIENT_ID`, `BACKEND_OAUTH_CLIENT_SECRET` | ✅ | ✅ | prod developer app |
 | `EAS_WEBHOOK_SECRET` | ✅ | ✅ | |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO_MONTHLY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | ✅ | | **live** mode only in prod |
-| `CREDIT_USD_VALUE` | ✅ | ✅ | |
+| `CREDIT_USD_VALUE`, `CREDIT_MARKUP` | ✅ | ✅ | margin report / optional cost-based pricing only (flat prices live in `lib/credits/plans.ts`) |
+| `GENERATION_DISABLED` | ✅ | ✅ | kill switch (also a `system_flags` row) |
 | `SENTRY_DSN` | ✅ | ✅ | |
 | `PREVIEW_ORIGIN` | ✅ | ✅ | separate preview domain or the app origin (see `07-preview-runtime.md` §6) |
 
@@ -103,7 +114,7 @@ Post-deploy smoke test (scripted where possible with Playwright against prod, te
 - [ ] QR / Snack opens in Expo Go
 - [ ] Connect backend (test provider account) → data persists
 - [ ] Zip export downloads; GitHub push to a test repo
-- [ ] Web publish URL loads
+- [ ] Web publish URL loads (for a backend-connected test app, data loads through the **production** gateway URL)
 - [ ] Android APK build reaches "finished" (can be async)
 - [ ] Stripe live checkout with a real card, then refund; credits granted once
 - [ ] Public showcase visible signed-out
@@ -156,7 +167,10 @@ Implement the code/config side (I will click through provider dashboards myself)
 1. worker/Dockerfile (Node 22, pinned eas-cli, JDK, Playwright Chromium, cached template deps) and the
    host config file for <FILL IN: Railway | Fly | Render>.
 2. CI: lint/typecheck/test on PRs; on main: drizzle-kit migrate then deploy web + worker.
-3. lib/env.ts complete Zod schema for every canonical var + CI check against .env.example.
+3. lib/env.ts complete Zod schema for every canonical var (incl. DATABASE_URL_DIRECT, AI_BUILDER_MODEL,
+   IMAGEKIT_ENABLED, GENERATION_DISABLED) + CI check against .env.example. Use DATABASE_URL_DIRECT
+   for pg-boss, SSE LISTEN and migrations.
+3b. Root .gitignore for all build/export/scratch output + a CI guard against huge or generated-file PRs.
 4. Structured logging with redaction, Sentry for web and worker, /api/health, worker heartbeat.
 5. Rate limiting + security headers middleware; GENERATION_DISABLED kill switch.
 6. Spend alert job from ai_usage (hourly), queue-depth/oldest-job alert.
@@ -171,7 +185,7 @@ Finish by running lint, typecheck, tests; summarize what I must do manually, in 
 ```
 
 ## Pitfalls & notes
-- **LISTEN/NOTIFY through poolers.** Transaction-mode poolers (PgBouncer, some serverless drivers) break `LISTEN`. pg-boss and the SSE tailer need a session/direct connection. On serverless web, the SSE route can fall back to short polling of `run_events` (by `id > lastEventId`) if LISTEN isn't available.
+- **LISTEN/NOTIFY through poolers.** Transaction-mode poolers (PgBouncer, some serverless drivers) break `LISTEN`. pg-boss and the SSE tailer need a session/direct connection (`DATABASE_URL_DIRECT`). On serverless web, the SSE route can fall back to short polling of `run_events` (by `id > lastEventId`) if LISTEN isn't available.
 - **SSE on serverless.** Function max duration still applies to streaming responses. Return after ~250 s with a `retry:` hint; the client reconnects with `Last-Event-ID` (`02-architecture.md` A3).
 - **Build-time public vars.** Changing `NEXT_PUBLIC_APP_URL` without a rebuild leaves the old value in client bundles. Always redeploy after changing it, as the video did.
 - **Worker scale-out.** Multiple worker replicas are fine with pg-boss (row locks). Watch Anthropic rate limits, and set per-kind concurrency (`teamSize`/`batchSize`) so builds don't starve thumbnails or vice versa.

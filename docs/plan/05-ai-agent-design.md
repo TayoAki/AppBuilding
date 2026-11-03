@@ -77,7 +77,7 @@ messages:                  chat history of the current session (append-only)
                            {role:"user"}   latest message     placed just before the newest user turn
 ```
 
-PROJECT STATE (rebuilt each message) holds: phase (`planning` with/without plan · `building` · `ready` · `failed` with N built), platform, plan name and credits with the price list, backend status and services, reference file names, the current plan JSON (without themes, collections or components), collections (name + field names), components (name, purpose, used-by), and themes (name, id, mode, active).
+PROJECT STATE (rebuilt each message) holds: phase (`planning` · `awaiting_confirmation` · `building` · `ready` · `failed` with N built), platform, plan name and credits with the price list, backend status and services, reference file names, the current plan JSON (without themes, collections or components), collections (name + field names), components (name, purpose, used-by), and themes (name, id, mode, active).
 
 Mid-conversation system messages are supported on Opus 5.5 without a beta. They keep the cached prefix intact and carry operator authority. On a model without them, put the state in a `<project-state>` block at the start of the user turn.
 

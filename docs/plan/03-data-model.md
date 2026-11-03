@@ -35,7 +35,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `title` | text | AI-suggested app name, user-renamable |
 | `prompt` | text | original prompt |
 | `platforms` | text[] | `{ios,android}` |
-| `status` | text | `planning` · `awaiting_confirmation` · `building` · `ready` · `error` |
+| `status` | text | `planning` (no plan yet) · `awaiting_confirmation` (plan proposed) · `building` · `ready` · `failed` (with N screens possibly built) |
 | `visibility` | text default `'private'` | `private` · `unlisted` · `public` (public = shown on home showcase) |
 | `active_theme_id` | text null | id inside the project's theme pack |
 | `theme_pack` | jsonb null | parsed palette list for the theme picker (§6) |
@@ -46,7 +46,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `bundle_id`, `android_package` | text null | iOS bundle identifier / Android package. Derived from slug, **locked after the first store build** (Phase 15) |
 | `eas_project_id` | text null | EAS project id on the user's Expo account (Phase 15) |
 | `remixed_from_project_id` | text null | set when duplicated from a public project (Phase 17) |
-| `template_version` | text | e.g. `expo-55@1` — which template the project was generated against |
+| `template_version` | text | e.g. `expo-54@1` — which template the project was generated against |
 | `thumbnail_key` | text null | storage key of latest screenshot |
 | `deleted_at` | timestamptz null | |
 | `updated_at` | timestamptz | |
@@ -100,7 +100,7 @@ One row per agent/worker task the user can see progress for.
 | `output` | jsonb | result summary (urls, file list…) |
 | `error` | jsonb null | `{code, message, retryable}` |
 | `transcript` | jsonb | Anthropic message array for agent runs (append-only) |
-| `credits_reserved` / `credits_charged` | bigint | micro-credits |
+| `credits_charged` / `credits_refunded` | bigint | micro-credits charged up front for this run / refunded for unbuilt work (Phase 18) |
 | `started_at`, `finished_at` | timestamptz | |
 | `job_id` | text | pg-boss job id of the current step |
 | `step` | text null | current pipeline step (`foundation`, `components`, `screen:<id>`, …). A redelivered job for an earlier step is ignored. |
@@ -188,6 +188,7 @@ Back this up. Losing the keystore means you can never update the app on Google P
 
 ### `web_deployments` (Phase 16)
 | `id` | `project_id` | `provider` (`eas_hosting`) | `url` | `alias` | `status` | `snapshot_id` | `log_tail` (last ~200 lines for the UI) |
+One row per project (`project_id` unique). `url` / live URL changes only when a publish succeeds, so a failed update leaves the old version online.
 
 ## 8. Billing and credits (Phase 06 logs usage; Phase 18 enforces)
 
@@ -196,7 +197,7 @@ One row per Anthropic API response. Written from Phase 06 on, even before billin
 | `id` | `run_id` | `user_id` | `model` | `input_tokens` | `output_tokens` | `cache_read_tokens` | `cache_write_tokens` | `cost_usd_micros` | `served_model` (if a fallback ran) |
 
 ### `credit_ledger`
-Append-only. `credits_balance = sum(amount)`.
+Append-only. Each balance equals the sum of its own rows: `credits_balance = sum(amount where balance='credits')`, `monthly_credits_balance = sum(amount where balance='monthly')`.
 | `id` | `user_id` | `amount` bigint (±micro-credits) | `balance` (`credits` \| `monthly`) | `reason` (`signup_grant`, `monthly_grant`, `monthly_reset`, `charge`, `refund`, `purchase`, `admin_adjust`) | `run_id` null | `reference` text **unique** (idempotency: e.g. `refund:<runId>:<screenId>`, `invoice:<stripeInvoiceId>`) |
 
 ### `subscriptions`
