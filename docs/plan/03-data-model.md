@@ -20,6 +20,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 |---|---|---|
 | `plan` | `text` default `'free'` | `free` \| `pro` (denormalized from subscription for fast gating) |
 | `credits_balance` | `bigint` default `0` | never-expiring credits (signup grant, refunds, top-ups); cache of its ledger sum |
+| `role` | `text` default `'user'` | `user` \| `admin` (admin pages: showcase approval, unpublish, kill switch) |
 | `monthly_credits_balance` | `bigint` default `0` | Pro monthly allowance; **spent first**; replaced on renewal, zeroed when Pro ends (Phase 18) |
 | `onboarded_at` | `timestamptz` null | |
 
@@ -44,6 +45,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `bundle_id`, `android_package` | text null | iOS bundle identifier / Android package. Derived from slug, **locked after the first store build** (Phase 15) |
 | `eas_project_id` | text null | EAS project id on the **owner's** Expo account (Phase 15/16; builds and publish are owner-only, ADR-003 #3) |
 | `eas_webhook_id`, `eas_webhook_secret_enc` | text null | per-project EAS webhook and its secret (created after EAS init; ADR-003 #17) |
+| `showcase_reviewed_by`, `showcase_reviewed_at` | text / timestamptz null | admin who approved/rejected (Phase 17) |
 | `showcase_status` | text default `'none'` | `none` · `pending` · `approved` · `rejected`: homepage showcase needs admin approval (D17); `visibility = public` alone only makes the link work |
 | `remixed_from_project_id` | text null | set when duplicated from a public project (Phase 17) |
 | `template_version` | text | e.g. `expo-58@1` — which template the project was generated against |
@@ -98,7 +100,7 @@ One row per agent/worker task the user can see progress for.
 | `project_id` | fk | |
 | `created_by` | text fk → user | the acting user (who clicked or typed) |
 | `billed_user_id` | text fk → user | who pays: always the project **owner** (ADR-003 #3); `ai_usage.user_id` and ledger rows use it |
-| `kind` | text | `chat` (one Planner turn) · `build` (step chain after confirm) · `change` (step chain after `update_app`) · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` · `template_upgrade` · `account_delete` |
+| `kind` | text | `chat` (one Planner turn) · `build` (step chain after confirm) · `change` (step chain after `update_app`) · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` · `template_upgrade` · `account_delete` · `export_my_data` |
 | `status` | text | `queued` · `running` · `succeeded` · `failed` · `canceled` |
 | `input` | jsonb | job params |
 | `output` | jsonb | result summary (urls, file list…) |
@@ -198,14 +200,16 @@ One live session per project; idle-stopped after 15 minutes without a connected 
 | `project_id` pk | `owner` | `repo` | `default_branch` | `last_pushed_snapshot_id` | `last_commit_sha` |
 
 ### `native_builds` (Phase 15)
-| `id` | `project_id` | `platform` (`android`/`ios`) | `artifact` (`apk`/`aab`/`ipa`) | `version`, `build_number` | `eas_build_id` | `status` | `artifact_url` | `logs_url` | `error` |
+| `id` | `project_id` | `requested_by` | `platform` (`android`/`ios`) | `artifact` (`apk`/`aab`/`ipa`) | `version`, `build_number` | `eas_build_id` | `status` (`queued` · `submitting` · `in_queue` · `building` · `finished` · `errored` · `canceled` · `needs_ios_setup`) | `artifact_url` | `logs_url` | `error` |
 
 ### `project_signing` (Phase 15)
 | `project_id` pk | `android_keystore_enc` (base64 jks, encrypted) | `android_keystore_password_enc` | `android_key_alias` | `android_key_password_enc` | `ios_asc_key_enc` (p8) | `ios_asc_key_id` | `ios_asc_issuer_id` | `apple_team_id` |
+Also: `android_fingerprint` (SHA-256 of the signing cert, recorded whichever way the keystore was created) and `apple_team_type` (`INDIVIDUAL` · `COMPANY_OR_ORGANIZATION` · `IN_HOUSE`).
 Back this up. Losing the keystore means you can never update the app on Google Play.
 
 ### `web_deployments` (Phase 16)
 | `id` | `project_id` | `provider` (`eas_hosting`) | `url` | `alias` | `status` | `snapshot_id` | `log_tail` (last ~200 lines for the UI) |
+Also: `deployment_id` (EAS Hosting deployment id of the live version).
 One row per project (`project_id` unique). `url` / live URL changes only when a publish succeeds, so a failed update leaves the old version online.
 
 ## 8. Billing and credits (Phase 06 logs usage; Phase 18 enforces)

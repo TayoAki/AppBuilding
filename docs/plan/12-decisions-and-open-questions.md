@@ -102,3 +102,14 @@ Decisions (each closes a review finding; phase docs follow these):
 22. **Signup credits are granted on email verification** (social sign-ins count as verified). Phase 02 adds an email sender. `signup_grants(email_hash pk)` prevents repeat grants after account deletion.
 23. **Roles:** `08` §2's matrix is authoritative. Rename = editor; builds and publish = owner. The homepage showcase needs admin approval (D17); a public link is immediate.
 24. Naming: `lib/backend` (not `lib/data`); `lib/render/*`; `lib/ai/prompts/state.ts`; `tests/e2e/`; the `screens` table is created in Phase 04 only; image MIME allowlist png/jpeg/webp/gif; `DAILY_SPEND_CAP_USD` env var.
+
+### ADR-004 — Decisions made while applying ADR-003 (2026-11-03)
+- **ADR-003 #18 is clarified:** the sandbox holds **no platform secrets** and has no DB access. It may receive a **user's** token (e.g. the owner's Expo token) for the duration of one job, passed in the per-job payload, never stored or logged.
+- Path B phone exposure: **B1** (reverse proxy per session + `EXPO_PACKAGER_PROXY_URL`, on `DEVICE_PREVIEW_BASE_DOMAIN`) vs **B2** (`expo start --tunnel`) is decided by spike S3. Sessions are tracked in `device_sessions`, with a `device.status` event. Public/showcase pages never start dev-server sessions (Path C link only).
+- The sandbox service skeleton is built in Phase 08 (its first user is the render smoke test). Phases 11, 15, 16 and 17 reuse it.
+- Gateway mode (Phase 13) issues gateway-signed per-install tokens (`X-Install-Token`). Forged install ids are rejected.
+- Homepage showcase approval uses `user.role = 'admin'` and `/admin/showcase`.
+- Screens in `error` state are excluded from the rendered layouts until fixed. Retrying one is a new charged run (ADR-003 #7).
+- Concurrency 2 fan-out uses a join counter in `runs.steps`.
+- Image pricing: generate/transform 4 credits, background removal 1, replace free. Free plans use placeholders.
+- Canonical env names: `SANDBOX_URL`, `SANDBOX_TOKEN_SECRET`, `DEVICE_PREVIEW_MODE`, `DEVICE_PREVIEW_BASE_DOMAIN`, `EMAIL_PROVIDER_API_KEY`, `EMAIL_FROM`, `SMTP_URL` (dev/Mailpit). The signup email hash is peppered with `BETTER_AUTH_SECRET`.

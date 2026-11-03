@@ -6,7 +6,7 @@
 | Branch | `feat/02-auth-db` |
 | Depends on | Phase 00, Phase 01 |
 | Effort (solo dev + Claude Code) | ~2–2.5 days (was 1.5–2; adds email verification + an email sender, per ADR-003 #22) |
-| New env vars | `DATABASE_URL` (now required), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `NEXT_PUBLIC_APP_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_LOGIN_CLIENT_ID`, `GITHUB_LOGIN_CLIENT_SECRET`, `EMAIL_FROM`, `EMAIL_API_KEY` (production email provider, e.g. Resend/Postmark), `SMTP_URL` (dev: Mailpit from docker-compose) |
+| New env vars | `DATABASE_URL` (now required), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `NEXT_PUBLIC_APP_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_LOGIN_CLIENT_ID`, `GITHUB_LOGIN_CLIENT_SECRET`, `EMAIL_FROM`, `EMAIL_PROVIDER_API_KEY` (production email provider, e.g. Resend/Postmark), `SMTP_URL` (dev: Mailpit from docker-compose) |
 
 ## Goal
 Users can sign up and sign in with email/password, Google or GitHub. Their user row carries `plan`, `credits_balance` and `monthly_credits_balance`. Email/password accounts **verify their email** (social sign-ins count as verified), and the signup grant is recorded as a `signup_grant` ledger entry **on verification**, once per email address ever. Submitting a prompt while signed out opens the auth dialog, **remembers the prompt (and attachments)**, and continues after sign-in. Authorization helpers (`requireUser`, `requireProjectAccess`) are created now, so every later route uses them from its first line.
@@ -34,7 +34,7 @@ Users can sign up and sign in with email/password, Google or GitHub. Their user 
 - Split the schema into files: `lib/db/schema/{auth.ts,credits.ts,index.ts}`, re-exported from `lib/db/schema.ts`.
 
 ### 2b. Email sender
-`lib/email/send.ts`: `sendEmail({to, subject, html, text})` behind a small provider interface. Use SMTP to Mailpit in dev (`SMTP_URL`) and the provider API in production (`EMAIL_API_KEY`, `EMAIL_FROM`). Phase 14 reuses it for share invites. Templates: verify email, reset password.
+`lib/email/send.ts`: `sendEmail({to, subject, html, text})` behind a small provider interface. Use SMTP to Mailpit in dev (`SMTP_URL`) and the provider API in production (`EMAIL_PROVIDER_API_KEY`, `EMAIL_FROM`). Phase 14 reuses it for share invites. Templates: verify email, reset password.
 
 ### 3. Credit ledger table
 `lib/db/schema/credits.ts`: `credit_ledger` **exactly** as in `03-data-model.md` §8: `id`, `user_id` (nullable for anonymization), `amount` bigint micro-credits, `balance` (`credits` | `monthly`), `reason`, `run_id` null, `reference text unique`, `created_at`. Also `signup_grants (email_hash text pk, granted_at)` and `processed_webhook_events (provider, event_id, pk(provider, event_id), received_at)`, the latter for Phase 18. `lib/credits/ledger.ts`: `grant(tx, {userId, amount, balance, reason, reference})` inserts the ledger row and updates the matching balance column in the same transaction. A duplicate `reference` is a no-op. The signup amount comes from `lib/credits/plans.ts` (`FREE_SIGNUP_GRANT` = 100 credits, `11` §4).

@@ -45,6 +45,8 @@ All prices live in `lib/credits/plans.ts`. The pricing page, upgrade dialogs and
 | Round of changes (one `update_app` that edits existing screens/components) | **5** for up to 2 regenerated files, **+3 per additional file** (`lib/credits/price.ts`, unit-tested; the tool result tells the Planner the charge) |
 | AI image generated or transformed in edit mode (Pro) | **4** (≈ $0.12 cost per generation, `15` §5) |
 | AI images during a build (Pro only, ≤ 8 per build, ≤ 4 per screen) | **4 each**, included in the build estimate shown on the Confirm button |
+| Background removal on an image (`e-bgremove`, 10 units) | **1** |
+| Replace an image with an upload or URL | **free** |
 | Images on Free plans | placeholders only, **free** |
 | Chat, planning, plan revisions, theme switches, inline visual edits, code saves | **free** |
 | Minimum balance to send the Planner a message | **5** |

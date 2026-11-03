@@ -6,7 +6,7 @@
 | Branch | `feat/11-device-preview-qr` |
 | Depends on | Phase 07 (template on SDK 58, `materialize()`), Phase 08 (generated apps, sandbox service), Phase 10 (inline edits arrive as revisions), Phase 00b S3 (connection mechanism chosen) |
 | Effort (solo dev + Claude Code) | ~4–6 days (Path B hosted dev server + Path C fallback; Path A Snack adds ~1–2 days if/when enabled) |
-| New env vars | `DEVICE_PREVIEW_MODE` (`devserver` \| `snack`, default `devserver`), `DEVPREVIEW_BASE_DOMAIN` (e.g. `devpreview.<brand>.com`), plus the sandbox service vars from Phase 08 (`SANDBOX_URL`, `SANDBOX_SHARED_SECRET`) |
+| New env vars | `DEVICE_PREVIEW_MODE` (`devserver` \| `snack`, default `devserver`), `DEVICE_PREVIEW_BASE_DOMAIN` (e.g. `devpreview.<brand>.com`), plus the sandbox service vars from Phase 08 (`SANDBOX_URL`, `SANDBOX_TOKEN_SECRET`) |
 
 ## Goal
 The App Preview header gets a **Scan QR Code** button. Its popover shows a QR code that opens the current project in **Expo Go** on a real phone, plus connection status. When the agent, the inline editor, the code editor or a theme switch changes anything, connected phones **live-reload without rescanning**. If Expo Go can't open the app, **Open in browser** shows it in the phone's browser. Expo Go is always offered first, for native features. The app runs against whatever backend is configured: device storage by default, the connected backend after Phase 13.
@@ -36,11 +36,11 @@ The App Preview header gets a **Scan QR Code** button. Its popover shows a QR co
 - It's packed as a tarball uploaded to storage. The sandbox gets a signed GET URL (it has no DB or storage credentials, ADR-003 #18).
 
 ### 2. Sandbox: dev server sessions (`sandbox/devserver/*`)
-- `POST /sessions` (HMAC-signed by the worker with `SANDBOX_SHARED_SECRET`, per-job token): `{ sessionId, tarballUrl, templateVersion }` →
+- `POST /sessions` (HMAC-signed by the worker with `SANDBOX_TOKEN_SECRET`, per-job token): `{ sessionId, tarballUrl, templateVersion }` →
   - unpack to `/sessions/<id>/`; link the **prebuilt `node_modules`** for the template version (read-only cache; never `npm install` agent-influenced deps);
   - start `npx expo start --port <p>` as an unprivileged user with an env allowlist. **Don't set `CI=1`**: in CI mode Metro disables reloads (verify in S3);
   - expose it to phones with the mechanism S3 chose (record it in an ADR):
-    - **B1 (default):** a reverse-proxy subdomain `d-<sessionId>.<DEVPREVIEW_BASE_DOMAIN>` → Metro port, with `EXPO_PACKAGER_PROXY_URL=https://d-<sessionId>.<…>` so the manifest's bundle URLs point at the proxy. QR = the `exp://`/`exps://` URL S3 confirmed Expo Go accepts;
+    - **B1 (default):** a reverse-proxy subdomain `d-<sessionId>.<DEVICE_PREVIEW_BASE_DOMAIN>` → Metro port, with `EXPO_PACKAGER_PROXY_URL=https://d-<sessionId>.<…>` so the manifest's bundle URLs point at the proxy. QR = the `exp://`/`exps://` URL S3 confirmed Expo Go accepts;
     - **B2:** `expo start --tunnel` (Expo's ngrok-based tunnel). It's simpler but depends on a third party;
   - respond `{ url: "exp://…", expiresAt }`.
 - `PUT /sessions/:id/files` `{ files: [{path, content|null}] }`: writes only changed files. Metro's watcher triggers **Fast Refresh** on connected Expo Go clients.

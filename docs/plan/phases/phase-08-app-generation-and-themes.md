@@ -6,7 +6,7 @@
 | Branch | `feat/08-app-generation-and-themes` |
 | Depends on | Phase 05 (jobs, step chaining), Phase 06 (Planner, confirmed plan), Phase 07 (template, renderers, VFS, preview runtime) |
 | Effort (solo dev + Claude Code) | ~6–8 days (was 5–7; adds the sandbox service skeleton for smoke renders, ADR-003 #18), plus ongoing prompt tuning with evals |
-| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; with `2`, the reference screen is built alone first, then the rest two at a time; ADR-003 #11). `SANDBOX_URL`, `SANDBOX_JOB_SECRET` (worker → sandbox service). `AI_BUILDER_MODEL` exists from Phase 06. |
+| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; with `2`, the reference screen is built alone first, then the rest two at a time; ADR-003 #11). `SANDBOX_URL`, `SANDBOX_TOKEN_SECRET` (worker → sandbox service). `AI_BUILDER_MODEL` exists from Phase 06. |
 
 ## Goal
 When the plan is confirmed (button or `confirm_plan`), a chain of `agent.step` jobs turns it into a working Expo app (`05-ai-agent-design.md` §4.1):
@@ -88,7 +88,7 @@ Per `05` §6:
 Output `{problems: Issue[], warnings: Issue[]}` → compact text (≤ ~4 KB) for repair prompts, plus a `validation.result` event. Unit tests: one broken-on-purpose fixture file per rule.
 
 ### 8. Render smoke test (`worker/agent/smoke.ts`)
-At `finish`, the worker calls the **sandbox service** (ADR-003 #18): `POST $SANDBOX_URL/render` with a per-job HMAC token (`SANDBOX_JOB_SECRET`) and a signed storage URL of the materialized `preview` target. The sandbox service has no DB access and no platform secrets, runs non-root with an env allowlist, and restricts egress where the host allows. It serves the bundled `public/preview-runtime/` from a local static server, loads `harness.html` in Playwright + Chromium, renders each route and returns the collected `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
+At `finish`, the worker calls the **sandbox service** (ADR-003 #18): `POST $SANDBOX_URL/render` with a per-job HMAC token (`SANDBOX_TOKEN_SECRET`) and a signed storage URL of the materialized `preview` target. The sandbox service has no DB access and no platform secrets, runs non-root with an env allowlist, and restricts egress where the host allows. It serves the bundled `public/preview-runtime/` from a local static server, loads `harness.html` in Playwright + Chromium, renders each route and returns the collected `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
 
 ### 9. Theme picker + `set_theme`
 - **Theme dropdown** centered at the top of the canvas (where the reference app put it): theme names with swatches, the active one checked.

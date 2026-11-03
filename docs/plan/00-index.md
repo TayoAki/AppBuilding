@@ -41,12 +41,12 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 | # | Phase | Video ch. | Effort* | Milestone |
 |---|---|---|---|---|
 | 00 | [Project setup](phases/phase-00-project-setup.md) | 4, 5 | 1 d | Repo, CI, review bot, local services |
-| 00b | [De-risking spikes](phases/phase-00b-derisking-spikes.md) | new | 7 d | **G0: architecture go/no-go**. Every risky assumption measured; S1's runtime code and the one canonical fixture graduate into `preview-runtime/` |
+| 00b | [De-risking spikes](phases/phase-00b-derisking-spikes.md) | new | 7.5 d | **G0: architecture go/no-go**. Every risky assumption measured; S1's runtime code and the one canonical fixture graduate into `preview-runtime/` |
 | 01 | [Home screen](phases/phase-01-home-screen.md) | 6 | 1–1.5 d | |
 | 02 | [Auth & database](phases/phase-02-auth-and-database.md) | 7 | 2–2.5 d | incl. email sender + verification-gated signup credits |
 | 03 | [Create project & uploads](phases/phase-03-create-project.md) | 8 | 1.5 d | |
 | 04 | [Workspace layout](phases/phase-04-workspace-layout.md) | 9 | 2 d | **M1: clickable shell** |
-| 05 | [Background jobs & realtime](phases/phase-05-jobs-and-realtime.md) | (11) new | 2.5–3 d | incl. outbox, two worker wrappers, project event stream |
+| 05 | [Background jobs & realtime](phases/phase-05-jobs-and-realtime.md) | (11) new | 2.5 d | incl. outbox, two worker wrappers, project event stream |
 | 06 | [Agent: planning](phases/phase-06-agent-planning.md) | 10 | 3 d | |
 | 07 | [App template & preview runtime](phases/phase-07-template-and-preview-runtime.md) | new | 3–5 d | hardens the S1 runtime |
 | 08 | [Agent: app generation & themes](phases/phase-08-app-generation-and-themes.md) | 11 | 6–8 d | incl. sandbox service skeleton (smoke tests). **M2: prompt → working app** |
@@ -59,23 +59,23 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 | 14 | [Export (zip, GitHub) & sharing](phases/phase-14-export-and-sharing.md) | 16 | 4–5 d | |
 | 15 | [Native builds (EAS)](phases/phase-15-native-builds.md) | 17 | 4–6 d | Expo connect / EAS init / identity now built in 16 |
 | 16 | [Web publish](phases/phase-16-web-publish.md) | 18 | 4–4.5 d | incl. Expo connect, EAS init, identity. **M4: feature-complete** |
-| 17 | [Projects gallery & showcase](phases/phase-17-projects-gallery.md) | 19 | 3–4 d | |
+| 17 | [Projects gallery & showcase](phases/phase-17-projects-gallery.md) | 19 | 3.5–4.5 d | |
 | 18 | [Plans, credits & billing](phases/phase-18-plans-and-billing.md) | 20 | 4 d | |
-| 19a | [Production deploy & ops](phases/phase-19-production-deploy.md) | 21 | 3–4 d | deploy, CI, observability |
-| 19b | [Data lifecycle, upgrades & launch gate](phases/phase-19-production-deploy.md) | new | 5–7 d | retention/deletion/export, template-upgrade machinery, vendor watch, G4 evidence. **M5: launch** |
+| 19a | [Production deploy & ops](phases/phase-19a-production-deploy.md) | 21 | 3–4 d | deploy, CI, observability |
+| 19b | [Data lifecycle, upgrades & launch gate](phases/phase-19b-launch-readiness.md) | new | 5–7 d | retention/deletion/export, template-upgrade machinery, vendor watch, G4 evidence. **M5: launch** |
 
 \* Working days for one developer using Claude Code, reflecting the ADR-003 scope changes. If a phase doc's header disagrees, the phase doc wins and this table must be updated in the same PR.
 
-**Full plan ≈ 76–97 working days (~15–19 weeks)**, before a recommended 15–20% buffer. Cumulative:
+**Full plan ≈ 77–98 working days (~15–20 weeks)**, before a recommended 15–20% buffer. Cumulative:
 
 | Gate / milestone | After | Cumulative |
 |---|---|---|
-| G0 | 00, 00b | ≈ 8 d |
-| M1 / G1 | 01–04 | ≈ 14.5–15.5 d |
-| M2 / G2 | 05–08 | ≈ 29–34.5 d |
-| M3 / G3 | 09, 10, 10b, 11 | ≈ 41.5–51.5 d |
-| M4 | 12–16 | ≈ 60.5–78 d |
-| M5 / G5 | 17, 18, 19a, 19b | ≈ 75.5–97 d |
+| G0 | 00, 00b | ≈ 8.5 d |
+| M1 / G1 | 01–04 | ≈ 15–16 d |
+| M2 / G2 | 05–08 | ≈ 29.5–34.5 d |
+| M3 / G3 | 09, 10, 10b, 11 | ≈ 42–51.5 d |
+| M4 | 12–16 | ≈ 61–78 d |
+| M5 / G5 | 17, 18, 19a, 19b | ≈ 76.5–97.5 d |
 
 ## MVP track (launch first, then v1.1)
 
@@ -83,10 +83,10 @@ A launchable beta needs only part of the plan:
 
 | Track | Phases | Effort |
 |---|---|---|
-| **MVP** | 00, 00b, 01–11, 10b, 14 *(zip export only, ≈ 1.5 d)*, 16 *(web publish incl. Expo connect, EAS init and identity)*, 17 *("my projects" grid only, ≈ 1.5 d)*, 18, 19a, 19b | **≈ 61–75 d (~12–15 weeks)** |
-| **v1.1** | 12 (AI images), 13 (generated-app backend), 14 *(GitHub push + sharing)*, 15 (native builds), 17 *(public showcase + approval queue)* | ≈ 15–23 d |
+| **MVP** | 00, 00b, 01–11, 10b, 14 *(zip export only, ≈ 1.5 d)*, 16 *(web publish incl. Expo connect, EAS init and identity)*, 17 *("my projects" grid only, ≈ 1.5 d)*, 18, 19a, 19b | **≈ 61–74 d (~12–15 weeks)** |
+| **v1.1** | 12 (AI images), 13 (generated-app backend), 14 *(GitHub push + sharing)*, 15 (native builds), 17 *(public showcase + approval queue)* | ≈ 15.5–23.5 d |
 
-MVP arithmetic (low–high): G0 8 · 01–04 6.5–7.5 · 05–08 14.5–19.5 · 09/10/10b/11 12.5–17 · 14-zip 1.5 · 16 4–4.5 · 17-mine 1.5 · 18 4 · 19a 3–4 · 19b 5–7.
+MVP arithmetic (low–high): G0 8.5 · 01–04 6.5–7.5 · 05–08 14.5–18.5 · 09/10/10b/11 12.5–17 · 14-zip 1.5 · 16 4–4.5 · 17-mine 1.5 · 18 4 · 19a 3–4 · 19b 5–7.
 
 At MVP, people can prompt → plan → build, edit by chat, inspector or code, test on their phone in store Expo Go (Path B), export the code and publish to the web. Apps keep data on the device and use placeholder images until v1.1 adds backends and AI images. Gate **G4** (`14` §2) must pass before launch.
 

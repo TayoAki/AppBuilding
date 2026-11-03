@@ -77,6 +77,7 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | `DEVICE_PREVIEW_MODE` | web, worker | 11 | — | `devserver` (default, Path B) \| `snack` (Path A, only if a published `snack-sdk` supports the template SDK) |
 | `DEVICE_PREVIEW_BASE_DOMAIN` | sandbox, worker | 11 | — | domain for per-session dev-server URLs (Path B, if S3 picks the reverse-proxy mechanism) |
 | `EMAIL_PROVIDER_API_KEY` / `EMAIL_FROM` | web, worker | 02 | ✅ / — | verification and invite emails (`lib/email`) |
+| `SMTP_URL` | web, worker | 02 | ✅ | dev only: Mailpit SMTP (`smtp://localhost:1025`); production uses the provider API key |
 | `DAILY_SPEND_CAP_USD` | worker | 06 | — | per-user model-spend cap before billing exists (default `5`); kept as a safety valve after Phase 18 |
 | `IMAGEKIT_URL_ENDPOINT` | worker, generated apps | 12 | — | public |
 | `IMAGEKIT_PRIVATE_KEY` | worker | 12 | ✅ | never sent to clients or generated apps |
