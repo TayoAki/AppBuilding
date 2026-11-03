@@ -79,12 +79,13 @@ Unique (project_id, email). The owner is implicit via `projects.owner_id`.
 | `project_id` | fk | |
 | `run_id` | fk null | the run that produced / was triggered by this message |
 | `role` | text | `user` · `assistant` · `system_note` |
-| `kind` | text | `text` · `plan_card` · `build_summary` · `error` · `element_ref` |
+| `kind` | text | `text` · `plan_card` · `build_summary` · `error` · `element_ref` · `session_break` (Start new session; the Planner replays only messages after the last one) |
 | `content` | text | markdown text shown in chat |
 | `payload` | jsonb | e.g. `AppPlan` for plan cards; `{afid, file, snippet}` for element refs |
 | `attachments` | jsonb | asset ids |
 
-> The **Anthropic message history** (with tool calls, thinking blocks, compaction blocks) is **not** the same as UI messages. We store the raw API transcript per run in `runs.transcript` (jsonb, append-only), so the agent can resume and keep thinking blocks valid. UI `messages` are a curated, user-facing projection.
+
+> The Planner's raw API turns (tool calls and thinking blocks) are stored unchanged in `messages.payload.api` and replayed append-only for the current session. Generators are stateless single calls (plus at most one repair), so they keep no transcript. UI `content` is the user-facing projection.
 
 ## 4. Runs, jobs and events (Phase 05)
 
@@ -94,12 +95,12 @@ One row per agent/worker task the user can see progress for.
 |---|---|---|
 | `id` | text pk | `run_…` |
 | `project_id` | fk | |
-| `kind` | text | `plan` · `plan_revision` · `build` · `edit` · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` |
+| `kind` | text | `chat` (one Planner turn) · `build` (step chain after confirm) · `change` (step chain after `update_app`) · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` |
 | `status` | text | `queued` · `running` · `succeeded` · `failed` · `canceled` |
 | `input` | jsonb | job params |
 | `output` | jsonb | result summary (urls, file list…) |
 | `error` | jsonb null | `{code, message, retryable}` |
-| `transcript` | jsonb | Anthropic message array for agent runs (append-only) |
+| `steps` | jsonb | per-step status for build/change runs (`{foundation: done, components: done, "screen:today": failed, …}`), used to resume and to compute refunds |
 | `credits_charged` / `credits_refunded` | bigint | micro-credits charged up front for this run / refunded for unbuilt work (Phase 18) |
 | `started_at`, `finished_at` | timestamptz | |
 | `job_id` | text | pg-boss job id of the current step |
@@ -145,7 +146,7 @@ The current state of each file.
 | `parent_revision_id` | fk null | |
 
 ### `project_snapshots` (Phase 08, used by export/undo)
-A point-in-time map `files: {path → revision_id}` (jsonb), plus `screens` (jsonb, the screen list at that time, so restore can bring back deleted screens), `label` (text, e.g. "After: add settings screen"), and `run_id`. Created at the end of every successful run, so "Restore previous version" is one row copy.
+A point-in-time map `files: {path → revision_id}` (jsonb), plus `plan` (jsonb copy of `projects.plan`, so restore brings back themes, collections and components), `screens` (jsonb, the screen list at that time, so restore can bring back deleted screens), `label` (text, e.g. "After: add settings screen"), and `run_id`. Created at the end of every successful run, so "Restore previous version" is one row copy.
 
 ### `screens`
 Denormalized list for the canvas and plan ↔ code linkage.
@@ -174,7 +175,7 @@ One table for every third-party account the user links.
 Unique (user_id, provider).
 
 ### `project_backends` (Phase 13)
-| `project_id` pk | `provider` | `external_project_id` | `public_config` jsonb (URL + anon/public key — safe to ship in the app) | `secret_config_enc` (service keys — never shipped) | `schema_version` int | `status` |
+| `project_id` pk | `provider` | `mode` (`direct` = provider client + RLS · `gateway` = platform `/api/apps/[id]/…`) | `external_project_id` | `public_config` jsonb (URL + anon/public key: safe to ship in the app) | `secret_config_enc` (service keys: never shipped) | `services` jsonb (`[{type, status}]`) | `schema_version` int | `status` (`connecting` · `provisioning` · `ready` · `failed` · `reconnect_required`) | `error` |
 
 ### `project_github_repos` (Phase 14)
 | `project_id` pk | `owner` | `repo` | `default_branch` | `last_pushed_snapshot_id` | `last_commit_sha` |

@@ -38,7 +38,9 @@ preview-runtime/
       expo-router.tsx  memory-history implementation of the subset the template uses:
                        Stack, Tabs, Slot, Link, Redirect, router, useRouter,
                        useLocalSearchParams, useSegments, usePathname, Stack.Screen options
-      expo-image.tsx, expo-linear-gradient.tsx, expo-haptics.ts (no-op), expo-constants.ts …
+      expo-haptics.ts (no-op), expo-image-picker.ts (<input type=file>), expo-clipboard.ts,
+                       expo-location.ts (browser geolocation, permission-gated), expo-notifications.ts (no-op),
+                       expo-linking.ts, expo-status-bar.ts — one shim per module in 06 §4
       async-storage.ts in-memory store; the parent persists snapshots via postMessage
                        (a sandboxed iframe without allow-same-origin has no usable
                        localStorage — touching it throws)

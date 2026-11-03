@@ -43,22 +43,22 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 | 03 | [Create project & uploads](phases/phase-03-create-project.md) | 8 | 1.5 d | |
 | 04 | [Workspace layout](phases/phase-04-workspace-layout.md) | 9 | 2 d | **M1: clickable shell** |
 | 05 | [Background jobs & realtime](phases/phase-05-jobs-and-realtime.md) | (11) new | 2 d | |
-| 06 | [Agent: planning](phases/phase-06-agent-planning.md) | 10 | 2–3 d | |
+| 06 | [Agent: planning](phases/phase-06-agent-planning.md) | 10 | 3 d | |
 | 07 | [App template & preview runtime](phases/phase-07-template-and-preview-runtime.md) | new | 6–8 d | ⚠️ highest-risk spike |
-| 08 | [Agent: app generation & themes](phases/phase-08-app-generation-and-themes.md) | 11 | 6–8 d | **M2: prompt → working app** |
+| 08 | [Agent: app generation & themes](phases/phase-08-app-generation-and-themes.md) | 11 | 5–7 d | **M2: prompt → working app** |
 | 09 | [Chat edits & add screens](phases/phase-09-chat-edits.md) | 11 | 3–4 d | |
 | 10 | [Inline visual editing](phases/phase-10-inline-editing.md) | 13 | 4–5 d | |
-| 11 | [Device preview (QR / Expo Go)](phases/phase-11-device-preview-qr.md) | 14 | 2–3 d | **M3: editable app on a real phone** |
+| 11 | [Device preview (QR / Expo Go)](phases/phase-11-device-preview-qr.md) | 14 | 3–4 d | **M3: editable app on a real phone** |
 | 12 | [AI images](phases/phase-12-ai-images.md) | 15 | 2–3 d | |
-| 13 | [Generated-app backend](phases/phase-13-generated-app-backend.md) | 12 | 5–7 d | |
+| 13 | [Generated-app backend](phases/phase-13-generated-app-backend.md) | 12 | 5–8 d | |
 | 14 | [Export (zip, GitHub) & sharing](phases/phase-14-export-and-sharing.md) | 16 | 4–5 d | |
 | 15 | [Native builds (EAS)](phases/phase-15-native-builds.md) | 17 | 5–7 d | |
 | 16 | [Web publish](phases/phase-16-web-publish.md) | 18 | 3 d | **M4: feature-complete** |
 | 17 | [Projects gallery & showcase](phases/phase-17-projects-gallery.md) | 19 | 3–4 d | |
-| 18 | [Plans, credits & billing](phases/phase-18-plans-and-billing.md) | 20 | 4–5 d | |
+| 18 | [Plans, credits & billing](phases/phase-18-plans-and-billing.md) | 20 | 4 d | |
 | 19 | [Production deploy & ops](phases/phase-19-production-deploy.md) | 21 | 3–4 d | **M5: launch** |
 
-\* Working days for one developer using Claude Code, from each phase doc. **Total ≈ 61–80 working days (~12–16 weeks)**, before buffer for review fixes and vendor surprises. Cumulative by milestone: M1 ≈ 7–9 d · M2 ≈ 23–30 d · M3 ≈ 32–42 d · M4 ≈ 51–67 d · M5 ≈ 61–80 d. A credible demo (M2–M3) is about 5–8 weeks in.
+\* Working days for one developer using Claude Code, from each phase doc. **Total ≈ 62–80 working days (~12–16 weeks)**, before buffer for review fixes and vendor surprises. Cumulative by milestone: M1 ≈ 7–9 d · M2 ≈ 23–29 d · M3 ≈ 33–42 d · M4 ≈ 52–68 d · M5 ≈ 62–80 d. A credible demo (M2–M3) is about 5–8 weeks in.
 
 **Order changes vs. the video**
 - **Background jobs (05)** move before any AI work. The video added them after generation already worked, which forced a rewrite and an ngrok tunnel.

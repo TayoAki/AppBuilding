@@ -76,7 +76,7 @@ As soon as a project is created, the worker runs the **Planner**, the only agent
 - Streaming prose renders live from `assistant.delta`. A collapsible "Thinking…" block comes from `thinking.summary`.
 
 ### 8. Revise by chat
-- Enable the chat input. `POST /api/projects/:id/messages` (editor) `{content, attachments?}` inserts the user message, creates a run (`plan_revision` while planning), and enqueues `agent.chat`.
+- Enable the chat input. `POST /api/projects/:id/messages` (editor) `{content, attachments?}` inserts the user message, creates a run (`kind = chat`), and enqueues `agent.chat`.
 - While `building`, return `409 "The plan can't change while screens are being built"`. Built-app changes arrive in Phase 09 (the same Planner, plus `update_app`).
 
 ### 9. Confirm & build
@@ -118,7 +118,7 @@ tests/fixtures/anthropic/{plan-habit.json,plan-invalid-then-fixed.json,confirm-i
 - New `ai_usage` (`03-data-model.md` §8).
 - `projects`: `plan jsonb`, `current_plan_message_id` (`03` §2).
 - `messages.payload.api` holds raw API content blocks per turn. `messages.kind` uses `text | plan_card | error`.
-- `runs.kind` uses `plan | plan_revision | build`; `runs.step` is set on build runs.
+- `runs.kind` uses `chat | build` (and `change` from Phase 09); `runs.step` is set on build runs.
 
 ## API surface
 | Method | Path | Auth | Request → Response |

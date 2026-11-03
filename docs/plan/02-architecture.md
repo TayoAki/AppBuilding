@@ -43,7 +43,7 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
                 │ SQL / job fetch
 ┌───────────────┴──────────────────────────────────────────────────┐
 │  Worker service (long-running Node process, no request timeout)  │
-│  ├─ agent.plan / agent.build / agent.edit  → Anthropic API       │
+│  ├─ agent.chat (Planner) / agent.step (generators) → Anthropic   │
 │  ├─ snack.sync        → Expo Snack (persistent save only)        │
 │  ├─ export.github     → GitHub API (Git Data API)                │
 │  ├─ build.native      → EAS Build (user's Expo token)            │
@@ -81,7 +81,7 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 ```
 User submits prompt (+ ≤5 images)
   → POST /api/projects            (create project; assets uploaded on Send via presigned PUT)
-  → insert run(kind=plan), enqueue job "agent.chat" {runId}
+  → insert run(kind=chat), enqueue job "agent.chat" {runId}
   → redirect /workspace/:projectId
 Browser opens SSE /api/runs/:runId/events
 Worker: agent.chat (Planner, see 05 §3)
@@ -103,7 +103,7 @@ Canvas iframes receive file revisions → hot-swap modules → re-render
 
 - **Chat edit / add screen**: the Planner calls `update_app(AppChange)`. The change pipeline regenerates only the affected data, components and screens; edited screens keep their old code until the new code passes validation. See `05` §3.5, §4.2.
 - **Inline visual edit**: browser → `POST /api/projects/:id/edits` with a structured operation (`{afid, op: "setStyle", prop, value}`). The server applies it as a deterministic AST transform (no LLM) and writes a new file revision. Canvas hot-reloads.
-- **Theme switch**: `POST /api/projects/:id/theme` → rewrite `theme/active.ts` → new revision. Instant.
+- **Theme switch**: `POST /api/projects/:id/theme` (or the Planner's `set_theme`) → update `activeThemeId` in `projects.plan.themePackage` → re-render `theme/themes.ts`. Instant: the preview just swaps CSS variables.
 
 ### 4.3 Device preview
 
@@ -134,6 +134,7 @@ All three start the same way. The worker **materializes** the project: template 
 │     ├─ uploads/presign/route.ts
 │     ├─ github/{connect,callback}/route.ts
 │     ├─ backend/{connect,callback}/route.ts
+│     ├─ apps/[projectId]/…            data gateway for generated apps (Phase 13, gateway mode)
 │     └─ webhooks/{stripe,eas}/route.ts
 ├─ components/                         shadcn/ui + feature components
 │  ├─ home/  workspace/  canvas/  inspector/  chat/
@@ -146,6 +147,7 @@ All three start the same way. The worker **materializes** the project: template 
 │  ├─ ai/ (client.ts, models.ts, prompts/, tools/, plan.ts, build.ts, edit.ts, usage.ts)
 │  ├─ codemods/ (AST edit operations for inline editing)
 │  ├─ snack/ (toSnackFiles.ts, useSnackSession.ts)
+│  ├─ backend-schema/ (collections → app_<name> DDL, additive sync) · render/ (themes, schema, seed, layouts)
 │  ├─ dto.ts (API response shapes) · errors.ts (typed app errors → HTTP)
 │  ├─ validate/ (import allowlist, typecheck-lite, route checks)
 │  ├─ providers/ (storage/, backend/, images/, build/, hosting/, billing/)
@@ -154,7 +156,7 @@ All three start the same way. The worker **materializes** the project: template 
 │  └─ env.ts (zod-validated env)
 ├─ worker/
 │  ├─ index.ts (pg-boss subscribe all handlers)
-│  └─ handlers/ (agent-plan.ts, agent-build.ts, agent-edit.ts, snack-sync.ts, …)
+│  └─ handlers/ (agent-chat.ts, agent-step.ts, snack-sync.ts, export-*.ts, …)
 ├─ preview-runtime/        separately bundled; served as static assets
 │  ├─ src/ (loader.ts, transpile.ts, router-shim/, bridge.ts, shims/)
 │  └─ build.mjs (esbuild → public/preview-runtime/*.js)

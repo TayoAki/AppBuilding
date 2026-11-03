@@ -20,7 +20,8 @@ Template source: `templates/expo-app/` (versioned; `projects.template_version`).
 
 ```
 app/
-  _layout.tsx                ← platform: root Stack, providers, first-screen redirect
+  _layout.tsx                ← platform: root Stack, providers, first-screen redirect, per-screen
+                               options from the plan (header shown/hidden, `presentation: "modal"` for add/edit screens)
   (tabs)/_layout.tsx         ← platform: shared tab bar from plan screens with `tab` (tab apps only)
   (tabs)/<screen-id>.tsx     ← Screen Builder: tab screens (the group doesn't change routes)
   <screen-id>.tsx            ← Screen Builder: stack screens (sign-in, details, …)
@@ -144,7 +145,8 @@ materialize(projectId, { target: "preview" | "snack" | "export" | "eas" | "web",
   2. overlay project_files (screens, components)
   3. target-specific transforms:
      - snack:  path aliases → relative imports; App.js entry replaces app/_layout.tsx;
-               "expo-router" → small shim on React Navigation (bottom-tabs for tab apps)  (Phase 11)
+               "expo-router" → small shim on React Navigation (bottom-tabs for tab apps); the generated
+               App.js reproduces the root layout: providers, `firstScreenId` as initial route, screen options  (Phase 11)
      - export/eas/web: package.json with versions from bundledNativeModules.json; eas.json;
                identity (`projects.slug`, `android_package`, `bundle_id`, set once at first build) (Phase 15);
                app.json web.output = "single" (SPA: screens never render in Node)

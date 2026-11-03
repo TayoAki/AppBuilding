@@ -155,7 +155,7 @@ Collections, themes and components are **not** in the plan the Planner writes. T
 ### 4.1 Build (after confirm)
 ```
 charge credits (10 per screen) ─► foundation ─► components ─► screen:<id> × N (sequential;
-   optional concurrency 2) ─► tab layout + routes (platform, deterministic) ─► backend setup
+   `AGENT_SCREEN_CONCURRENCY` default 1; with 2, screen 1 is built alone first so it can be the style reference) ─► tab layout + routes (platform, deterministic) ─► backend setup
    (if connected) ─► snapshot ─► build_summary message ─► status ready
 ```
 - **Foundation** returns 5 themes (the first matches `plan.design`, the others are real alternatives, at least one in the opposite mode) and 2–5 collections with 5–8 realistic sample records each. The platform post-processes themes for contrast (`06` §5) and writes `theme/themes.ts`, `data/schema.ts` and `data/seed.ts` **deterministically from the JSON**. The agent writes no data plumbing.

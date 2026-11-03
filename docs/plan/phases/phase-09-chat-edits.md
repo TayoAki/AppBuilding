@@ -39,7 +39,7 @@ After the first build, the user keeps working in chat. They can ask questions, c
   - `editComponents` names exist; `addComponents` names are new and PascalCase;
   - a credit pre-check (enforced in Phase 18; until then, only logged).
 - Failures return a short tool error that the Planner relays plainly. It never claims the work happened.
-- On success: store the change in `projects.plan.pendingChanges`, create `runs(kind=edit)`, and enqueue the first `agent.step`. The Planner then replies with one sentence on what's starting.
+- On success: store the change in `projects.plan.pendingChanges`, create `runs(kind=change)`, and enqueue the first `agent.step`. The Planner then replies with one sentence on what's starting.
 - `set_theme {themeId}` writes `activeThemeId` in `projects.plan.themePackage` and re-renders `theme/themes.ts`. `set_theme {newTheme}` runs the derivation + contrast pipeline (`06` §5) and adds the theme. Both are free and need no run; the frames get `theme.set`.
 
 ### 3. Change pipeline (`worker/handlers/agent-step.ts`, change steps)
@@ -95,7 +95,7 @@ evals/edits.jsonl
 ```
 
 ## Database changes
-- `runs.kind = edit` (in the enum); `runs.step` / `runs.lease_id` (Phase 05/08).
+- `runs.kind = change` (in the enum); `runs.step` / `runs.lease_id` (Phase 05/08).
 - `projects.plan.pendingChanges` (inside the `plan` jsonb).
 - `messages.kind`: `build_summary`, `session_break` (new value), `element_ref` (existing). `payload` carries `selectedElement` / `error`.
 - `project_snapshots`: `screens jsonb`, `label text` (already in `03` §5), plus the `plan` jsonb at snapshot time (needed so restore brings back collections, components and themes).
