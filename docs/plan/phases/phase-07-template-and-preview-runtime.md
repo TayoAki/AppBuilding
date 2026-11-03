@@ -5,7 +5,7 @@
 | Video chapter(s) | New (not in video). It's the foundation the video's Ch.11 "Generate Mobile App with AI" (1:11:10) assumes; reference repo Ch.6 + Ch.9 runtime notes |
 | Branch | `feat/07-template-and-preview-runtime` |
 | Depends on | Phase 04 (workspace layout), Phase 05 (jobs & realtime; for `file.written` events) |
-| Effort (solo dev + Claude Code) | ~6–8 days. The spike is ~3 days, and this is the riskiest phase. |
+| Effort (solo dev + Claude Code) | ~3–5 days. The ~3-day runtime spike now runs earlier, as S1 in Phase 00b, and its fixture + findings are reused here. |
 | New env vars | `PREVIEW_ORIGIN` (optional; defaults to sandboxed `srcdoc` iframes) |
 
 ## Goal

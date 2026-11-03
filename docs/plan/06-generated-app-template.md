@@ -153,3 +153,15 @@ materialize(projectId, { target: "preview" | "snack" | "export" | "eas" | "web",
      - export: README (npm install && npx expo start)
   4. assets
 ```
+
+## 11. Template versions and upgrades
+
+Expo ships new SDKs a few times a year, and `snack-sdk` and Expo Go follow. Projects must be able to move forward without being regenerated.
+
+- **Versioning.** `templates/expo-app/VERSION` is `expo-<sdk>@<rev>` (e.g. `expo-54@3`). Every project stores `template_version`. Platform files are rendered from the version the project is on: old template versions stay in the repo under `templates/expo-app/versions/<version>/` until no project uses them.
+- **Upgrade scripts.** `templates/migrations/<from>__<to>.ts` exports `migrate({ plan, files }) → { plan, files, notes[] }`. These are deterministic codemods: renamed imports, changed APIs, new required props. A script never calls the model. If a change can't be automated, it lists the screens needing an AI change in `notes`.
+- **Dry run first.** `upgradeProject(projectId, to)` runs the chain of scripts in memory, validates every file (`05` §6), and runs the render smoke test (`07` §8). It applies the result (new revisions with `author = "system"` + snapshot) only if both pass. Otherwise it reports, and the project stays on its version.
+- **UX.** A banner "This app uses SDK X. Upgrade to preview on current Expo Go" offers **Upgrade** (dry run → apply) and **Undo** (restore the pre-upgrade snapshot). Admins can run batch upgrades as a job (`runs.kind = template_upgrade`).
+- **Process for a new SDK:** add the new template version and its migration script, run the eval suite on both versions, upgrade the fixture and eval projects, then flip the default for new projects. Existing projects upgrade on demand or in batches.
+- Phase 19 adds the monthly vendor check that triggers this process (`14` §4).
+

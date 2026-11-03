@@ -106,6 +106,11 @@ If the domain ever changes, run `scripts/rotate-eas-webhooks.ts` to update exist
 - `ENCRYPTION_KEY` stored in a secret manager with offline backup. Losing it makes every stored token and keystore unreadable. Key rotation: add the new key as `ENCRYPTION_KEY_VERSION+1`, re-encrypt in a background job, retire the old one.
 - **Android keystores** (`project_signing`): nightly encrypted export to a separate bucket/account. A lost keystore means users can never update their Play Store app.
 
+### 7b. Data lifecycle, vendor watch, launch gate
+- Implement `08-security.md` §11: retention jobs (`tmp/`, export zips, `run_events`, 30-day project purge), **Delete account** (`runs.kind = account_delete`, re-auth) and **Export my data**.
+- Vendor watch: a nightly smoke job (Snack load of the fixture, `eas build --dry-run`-style config check, ImageKit fetch, provider health) plus a monthly release-notes review that triggers the template-upgrade process (`06` §11).
+- Run gate **G4** (`14-confidence-gates.md` §2) and attach its evidence (pentest notes, load test of 20 concurrent builds, a tested restore, cost alerts firing) to the launch PR.
+
 ### 8. Deploy, smoke test, rollback
 Post-deploy smoke test (scripted where possible with Playwright against prod, test account):
 - [ ] Sign up (email) + Google + GitHub sign-in
@@ -152,6 +157,9 @@ Rollback: Vercel instant rollback to the previous deployment; worker redeploys t
 - [ ] PITR restore drill and keystore backup restore both succeed.
 - [ ] No secret values appear in logs (log scan test) and `/api/health` exposes nothing sensitive.
 - [ ] Rollback rehearsed once: previous web deployment + previous worker image run against the current DB.
+
+- [ ] Account deletion removes or anonymizes everything listed in `08` §11, verified on a test account; Export my data produces a zip.
+- [ ] Gate G4 evidence attached (pentest, load test, restore test, alerts).
 
 ## Claude Code prompt
 ```text

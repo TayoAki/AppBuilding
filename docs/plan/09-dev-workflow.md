@@ -15,6 +15,7 @@ How we turn each phase doc into merged code. It's the video's rhythm (one featur
 5. Let it implement in small commits. Interrupt early if it drifts from the doc.
 6. Run the acceptance checklist by hand in the browser. Paste any errors back.
 7. npm run lint && npm run typecheck && npm test   (CI runs the same)
+   Attach the evidence `14-confidence-gates.md` §3 requires (how each checklist item was verified).
 8. Push, open a PR using the template below. Wait for CI + CodeRabbit.
 9. Fix every "major"/security finding; triage minor ones (fix, or note why not).
 10. Squash-merge. Update the phase doc's checklist + 12-decisions if anything changed.

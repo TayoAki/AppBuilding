@@ -95,7 +95,7 @@ One row per agent/worker task the user can see progress for.
 |---|---|---|
 | `id` | text pk | `run_…` |
 | `project_id` | fk | |
-| `kind` | text | `chat` (one Planner turn) · `build` (step chain after confirm) · `change` (step chain after `update_app`) · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` |
+| `kind` | text | `chat` (one Planner turn) · `build` (step chain after confirm) · `change` (step chain after `update_app`) · `snack_sync` · `export_zip` · `export_github` · `build_native` · `publish_web` · `backend_provision` · `thumbnail` · `template_upgrade` · `account_delete` |
 | `status` | text | `queued` · `running` · `succeeded` · `failed` · `canceled` |
 | `input` | jsonb | job params |
 | `output` | jsonb | result summary (urls, file list…) |

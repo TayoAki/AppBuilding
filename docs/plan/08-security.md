@@ -97,3 +97,29 @@ Generated code executes on our infrastructure during **thumbnail rendering**, **
 - **CodeRabbit** (or another automated reviewer) on every PR, plus a `security-review` pass on PRs touching `lib/auth`, `lib/crypto`, `api/webhooks`, `preview-runtime`, `worker/handlers/build-*`.
 - `npm audit` / Dependabot weekly; pin GitHub Actions by SHA.
 - Before launch: one manual pentest pass against §1 (two accounts, try to read and modify each other's projects, runs, files, exports; try XSS from a generated screen; try to make the agent write outside allowed paths).
+
+## 11. Data lifecycle: retention, deletion, export
+
+| Data | Retention |
+|---|---|
+| `tmp/` uploads (before a project exists) | 1 day (bucket lifecycle rule) |
+| Export zips | 7 days, then deleted (re-export anytime) |
+| `run_events` | 30 days after the run finishes (run summary stays in `runs`) |
+| Planner API turns (`messages.payload.api`) | life of the project. Deleted with it |
+| `ai_usage` | kept for accounting; `user_id` nulled on account deletion |
+| Deleted projects | soft-deleted for 30 days (restorable), then hard-deleted by a job |
+| Stripe records | per Stripe's and tax obligations; we keep only ids |
+
+**Delete project.** Waits for active runs. Soft delete (`deleted_at`), then a hard-delete job after 30 days removes project rows, revisions, snapshots, assets and storage objects. It doesn't touch the person's GitHub repo, EAS project/website or backend project; the dialog says so (as in the reference app) and links to them.
+
+**Delete account** (`runs.kind = account_delete`, settings page, re-auth required):
+1. Cancel any Stripe subscription immediately (no refund unless policy says so) and detach payment methods.
+2. Revoke provider tokens where an API exists (GitHub, backend provider; Expo tokens are user-created, so tell them to revoke theirs), then delete `oauth_connections` and `project_signing` rows (offer keystore download first).
+3. Delete all owned projects (immediate hard delete, with the same scope as above), memberships and pending invites.
+4. Anonymize `ai_usage` and `credit_ledger` (`user_id` → null), and delete the Better Auth user, sessions and accounts.
+5. Email a confirmation. The whole job is idempotent and resumable.
+
+**Export my data.** A settings action produces a zip: profile, projects (materialized `export` target for each), chat history, ledger. It reuses the Phase 14 export job.
+
+**Privacy policy must state:** prompts, uploads and generated code are sent to the model provider (Anthropic) under our API terms for processing. We don't use them for training, and we don't enable any data-sharing programs (`01` P14).
+

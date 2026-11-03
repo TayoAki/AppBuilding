@@ -11,7 +11,8 @@ It's based on a review of the TubeGuruji course *"Build Lovable for Mobile Apps 
 1. **`01-video-review.md`** (10 min): what the video builds, what goes wrong in it, what we change. Then **`13-reference-implementation.md`**: what the course's actual prompts and architecture notes taught us.
 2. **`02-architecture.md`** + **`03-data-model.md`**: the system we're building, and the canonical names.
 3. Skim **`05`–`08`**: agent, app template, preview runtime, security. The phases refer back to them constantly.
-4. Work through **`phases/`** in order, one PR per phase, using the loop in **`09-dev-workflow.md`**.
+4. Read **`14-confidence-gates.md`**: what's proven, what isn't yet, and the gates that catch problems early.
+5. Work through **`phases/`** in order, starting with **00 → 00b (spikes)**, one PR per phase, using the loop in **`09-dev-workflow.md`**.
 
 ## Reference docs
 
@@ -29,6 +30,7 @@ It's based on a review of the TubeGuruji course *"Build Lovable for Mobile Apps 
 | [10-testing-and-evals.md](10-testing-and-evals.md) | Test layers, agent eval harness and quality targets, model mocking for CI |
 | [11-costs-and-pricing.md](11-costs-and-pricing.md) | Cost per app/edit estimate, credit formula, what plan limits really cost |
 | [12-decisions-and-open-questions.md](12-decisions-and-open-questions.md) | Decisions D1–D18 with defaults, open research questions, ADR log |
+| [14-confidence-gates.md](14-confidence-gates.md) | Assumption register (A1–A20, each proven / likely / unproven with its test and fallback), gates G0–G5, evidence rules, what we monitor |
 | [13-reference-implementation.md](13-reference-implementation.md) | What the course's real source roadmap + prompt book revealed: chapter map, 22 adopted patterns (R1–R22), where we differ, pitfalls they hit |
 
 ## Phases
@@ -38,16 +40,18 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 | # | Phase | Video ch. | Effort* | Milestone |
 |---|---|---|---|---|
 | 00 | [Project setup](phases/phase-00-project-setup.md) | 4, 5 | 1 d | Repo, CI, review bot, local services |
+| 00b | [De-risking spikes](phases/phase-00b-derisking-spikes.md) | new | 7 d | **G0: architecture go/no-go**. Every risky assumption measured |
 | 01 | [Home screen](phases/phase-01-home-screen.md) | 6 | 1–1.5 d | |
 | 02 | [Auth & database](phases/phase-02-auth-and-database.md) | 7 | 1.5–2 d | |
 | 03 | [Create project & uploads](phases/phase-03-create-project.md) | 8 | 1.5 d | |
 | 04 | [Workspace layout](phases/phase-04-workspace-layout.md) | 9 | 2 d | **M1: clickable shell** |
 | 05 | [Background jobs & realtime](phases/phase-05-jobs-and-realtime.md) | (11) new | 2 d | |
 | 06 | [Agent: planning](phases/phase-06-agent-planning.md) | 10 | 3 d | |
-| 07 | [App template & preview runtime](phases/phase-07-template-and-preview-runtime.md) | new | 6–8 d | ⚠️ highest-risk spike |
+| 07 | [App template & preview runtime](phases/phase-07-template-and-preview-runtime.md) | new | 3–5 d | runtime already proven in S1 |
 | 08 | [Agent: app generation & themes](phases/phase-08-app-generation-and-themes.md) | 11 | 5–7 d | **M2: prompt → working app** |
 | 09 | [Chat edits & add screens](phases/phase-09-chat-edits.md) | 11 | 3–4 d | |
 | 10 | [Inline visual editing](phases/phase-10-inline-editing.md) | 13 | 4–5 d | |
+| 10b | [Code editing](phases/phase-10b-code-editing.md) | new | 1.5–2 d | |
 | 11 | [Device preview (QR / Expo Go)](phases/phase-11-device-preview-qr.md) | 14 | 3–4 d | **M3: editable app on a real phone** |
 | 12 | [AI images](phases/phase-12-ai-images.md) | 15 | 2–3 d | |
 | 13 | [Generated-app backend](phases/phase-13-generated-app-backend.md) | 12 | 5–8 d | |
@@ -58,7 +62,18 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 | 18 | [Plans, credits & billing](phases/phase-18-plans-and-billing.md) | 20 | 4 d | |
 | 19 | [Production deploy & ops](phases/phase-19-production-deploy.md) | 21 | 3–4 d | **M5: launch** |
 
-\* Working days for one developer using Claude Code, from each phase doc. **Total ≈ 62–80 working days (~12–16 weeks)**, before buffer for review fixes and vendor surprises. Cumulative by milestone: M1 ≈ 7–9 d · M2 ≈ 23–29 d · M3 ≈ 33–42 d · M4 ≈ 52–68 d · M5 ≈ 62–80 d. A credible demo (M2–M3) is about 5–8 weeks in.
+\* Working days for one developer using Claude Code, from each phase doc. **Full plan ≈ 68–85 working days (~14–17 weeks)**, before a recommended 15–20% buffer. Cumulative: G0 ≈ 8 d · M1 ≈ 14–15 d · M2 ≈ 27–32 d · M3 ≈ 39–47 d · M4 ≈ 58–73 d · M5 ≈ 68–85 d. Each milestone also has a gate (`14` §2).
+
+## MVP track (launch first, then v1.1)
+
+A launchable beta needs only part of the plan:
+
+| Track | Phases | Effort |
+|---|---|---|
+| **MVP** | 00, 00b, 01–11, 10b, 14 *(zip export only)*, 16 (web publish), 17 *("my projects" grid only)*, 18, 19 | **≈ 52–61 d (~10–12 weeks)** |
+| **v1.1** | 12 (AI images), 13 (generated-app backend), 14 *(GitHub push + sharing)*, 15 (native builds), 17 *(public showcase)* | ≈ 16–24 d |
+
+At MVP, people can prompt → plan → build, edit by chat, inspector or code, test on their phone, export the code and publish to the web. Apps keep data on the device until v1.1 adds backends. Gate **G4** (`14` §2) must pass before launch.
 
 **Order changes vs. the video**
 - **Background jobs (05)** move before any AI work. The video added them after generation already worked, which forced a rewrite and an ngrok tunnel.
@@ -68,8 +83,8 @@ Each phase doc has: goal · what differs from the video · steps · files · DB 
 ## Dependency graph
 
 ```
-00 → 01 → 02 → 03 → 04 ─┬─→ 05 → 06 ─┐
-                        └────→ 07 ───┴─→ 08 → 09 → 10
+00 → 00b(G0) → 01 → 02 → 03 → 04 ─┬─→ 05 → 06 ─┐
+                                  └────→ 07 ───┴─→ 08 → 09 → 10 → 10b
                                           │
                                           ├─→ 11 (needs 07 materialize)
                                           ├─→ 12
@@ -85,5 +100,5 @@ Phases 05 and 07 can be built in parallel by two people (or two worktrees).
 
 Tick as phases merge. Keep this the single source of truth for progress.
 
-- [ ] 00 · [ ] 01 · [ ] 02 · [ ] 03 · [ ] 04 · [ ] 05 · [ ] 06 · [ ] 07 · [ ] 08 · [ ] 09
-- [ ] 10 · [ ] 11 · [ ] 12 · [ ] 13 · [ ] 14 · [ ] 15 · [ ] 16 · [ ] 17 · [ ] 18 · [ ] 19
+- [ ] 00 · [ ] 00b/G0 · [ ] 01 · [ ] 02 · [ ] 03 · [ ] 04 · [ ] 05 · [ ] 06 · [ ] 07 · [ ] 08 · [ ] 09
+- [ ] 10 · [ ] 10b · [ ] 11 · [ ] 12 · [ ] 13 · [ ] 14 · [ ] 15 · [ ] 16 · [ ] 17 · [ ] 18 · [ ] 19
