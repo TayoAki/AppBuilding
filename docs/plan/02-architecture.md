@@ -44,7 +44,7 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 ┌───────────────┴──────────────────────────────────────────────────┐
 │  Worker service (long-running Node process, no request timeout)  │
 │  ├─ agent.plan / agent.build / agent.edit  → Anthropic API       │
-│  ├─ snack.sync        → Expo Snack                               │
+│  ├─ snack.sync        → Expo Snack (persistent save only)        │
 │  ├─ export.github     → GitHub API (Git Data API)                │
 │  ├─ build.native      → EAS Build (user's Expo token)            │
 │  ├─ publish.web       → `expo export -p web` + EAS Hosting       │
@@ -110,7 +110,7 @@ Canvas iframes receive file revisions → hot-swap modules → re-render
 
 ### 4.3 Device preview
 
-`POST /api/projects/:id/snack` → enqueue `snack.sync`. The worker creates or updates the Snack session (`snack-sdk`) from the current files and returns `exp://` URL → QR. Later file revisions push incremental updates to the same Snack, so the device live-reloads without rescanning.
+The **live** Snack session runs **in the browser tab** (`snack-sdk` works client-side). When the QR popover opens, the workspace builds the Snack files from the materialized project and gets the `exp://` URL → QR. On every `file.written` event it pushes only the changed files, so phones live-reload without rescanning. The worker job `snack.sync` only makes a **persistent save** (a stable link that works with the workspace closed), stored in `projects.snack`. See Phase 11.
 
 ### 4.4 Export / build / publish
 
@@ -148,6 +148,8 @@ All three start the same way. The worker **materializes** the project: template 
 │  ├─ vfs/ (project file system: read/write/revisions/materialize)
 │  ├─ ai/ (client.ts, models.ts, prompts/, tools/, plan.ts, build.ts, edit.ts, usage.ts)
 │  ├─ codemods/ (AST edit operations for inline editing)
+│  ├─ snack/ (toSnackFiles.ts, useSnackSession.ts)
+│  ├─ dto.ts (API response shapes) · errors.ts (typed app errors → HTTP)
 │  ├─ validate/ (import allowlist, typecheck-lite, route checks)
 │  ├─ providers/ (storage/, backend/, images/, build/, hosting/, billing/)
 │  ├─ crypto/ (encrypt.ts)
@@ -172,8 +174,8 @@ All three start the same way. The worker **materializes** the project: template 
 | Process | Local dev | Production |
 |---------|-----------|------------|
 | Web | `npm run dev` (Next.js) | Vercel (or Railway/Render Node service) |
-| Worker | `npm run worker` (tsx watch) | Railway / Fly / Render long-running service, Node 22+, with `eas-cli` available. Needs a writable temp disk. |
-| DB | Docker Postgres or a hosted dev DB | Managed Postgres (Neon, Railway, Supabase, CloudHike …) |
+| Worker | `npm run worker` (tsx watch) | Railway / Fly / Render long-running service: Node 22+, `eas-cli`, a JDK (`keytool` for Android keystores), Chromium (Playwright smoke tests + thumbnails), cached template `node_modules`, writable temp disk. |
+| DB | Docker Postgres or a hosted dev DB | Managed Postgres (Neon, Railway, Supabase, CloudHike …). pg-boss and SSE `LISTEN` need a **direct/session-mode** connection (`DATABASE_URL_DIRECT`); transaction-mode poolers break `LISTEN`. |
 | Storage | MinIO (docker) or hosted bucket | S3 / R2 / Railway bucket / CloudHike storage |
 | Preview runtime origin | `http://localhost:3000/preview-runtime/` loaded into `sandbox="allow-scripts"` iframes (opaque origin) | Same, or a separate domain like `preview.<brand>.com` for defense-in-depth |
 

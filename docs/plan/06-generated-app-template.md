@@ -19,7 +19,8 @@ Template location in the platform repo: `templates/expo-app/`. It's versioned (`
 ```
 app/                         ← agent-owned: Expo Router routes
   _layout.tsx                  root Stack + ThemeProvider + SafeAreaProvider
-  (tabs)/_layout.tsx           Tabs (generated from plan.navigation)
+  (tabs)/_layout.tsx           ← platform-written: Tabs, regenerated deterministically from
+                                 the `screens` list + plan.navigation (S1, add/remove screen)
   (tabs)/index.tsx             first tab screen
   (tabs)/<screen>.tsx
   <stack-screen>.tsx           e.g. habit/[id].tsx, add-habit.tsx (modal)
@@ -35,11 +36,12 @@ theme/
 data/
   types.ts                   ← agent-owned: entity types (from plan.entities)
   seed.ts                    ← agent-owned: realistic sample data
+  images.ts                  ← agent-owned (Phase 12): image registry { key: {uri, width, height} }
 lib/
   store/                     ← agent-owned: one collection per entity, via createCollection()
   data/                      ← platform-owned: adapter interface + LocalAdapter + RemoteAdapter
     config.ts                ← platform-written: which adapter + public backend config
-  images.ts                  ← platform-owned (Phase 12): image URL helper
+  images.ts                  ← platform-owned (Phase 12): image URL helper + <RemoteImage>
 backend/                     ← agent-owned (Phase 13)
   migrations/NNN_*.sql
 assets/                      ← platform-managed: icon, splash, uploaded images
@@ -52,7 +54,8 @@ README.md                    ← platform-generated at export
 
 | Path | Agent may write | User code editor may write | Notes |
 |---|---|---|---|
-| `app/**` | ✅ | ✅ | |
+| `app/**` (except `app/(tabs)/_layout.tsx`) | ✅ | ✅ | |
+| `app/(tabs)/_layout.tsx` | ❌ (platform regenerates from `screens`) | ❌ | Keeps tab order consistent (Phase 09) |
 | `components/<screenId>/**`, `components/shared/**` | ✅ | ✅ | |
 | `components/ui/**` | ❌ | ❌ (v1) | The library is versioned with the template |
 | `theme/themes.ts` | ✅ | ✅ | |
@@ -61,6 +64,8 @@ README.md                    ← platform-generated at export
 | `lib/data/**` | ❌ | ❌ | Rewritten by backend connect |
 | `backend/migrations/**` | ✅ (Phase 13) | ✅ | Applied by provisioning job, never by the agent |
 | `package.json`, `app.json`, `eas.json`, configs | ❌ | ❌ | Generated from project metadata at materialization |
+
+Use a **static `app.json` only**, never `app.config.js`/`app.config.ts`. A JS config would execute code during `expo export`/EAS builds.
 
 Platform-owned files are **not stored per project**. They're rendered from the template plus project metadata (name, slug, bundle id, icon, theme colors for splash) every time we materialize. So a template patch fixes every project at once.
 
@@ -83,6 +88,8 @@ Only modules that ship in Expo Go **and** work on react-native-web:
 
 Add modules only when the preview runtime has a working web shim **and** the Snack/Expo Go SDK includes them. Each addition is a template version bump.
 
+**Expected addition in Phase 13:** the chosen backend's JS client (e.g. `@supabase/supabase-js`). It gets imported only by platform-owned `lib/data/remote*.ts`, never by agent code. It's added to the preview runtime's vendor bundle, and the backend URL is added to the runtime CSP `connect-src` (`07` §6).
+
 ## 5. Theme system
 
 ```ts
@@ -103,6 +110,7 @@ export type Theme = {
 - The agent writes **5 themes** in `theme/themes.ts`. The first matches `plan.themeSeed`, the rest are variations (e.g. "Mint Leisure", "Harbor Night" in the video).
 - When `themes.ts` is written, the platform **post-processes** it with a deterministic contrast fix: `onPrimary`/`text` are adjusted until WCAG AA contrast (≥ 4.5:1) holds. "Text colors adjust automatically to stay readable" in the video is this step.
 - The theme picker writes `theme/active.ts` only. The preview hot-swaps it instantly, with no LLM call and no credits.
+- **Contract rule:** build theme-dependent styles **inside** the component, `const styles = useMemo(() => makeStyles(theme), [theme])`, never in a module-level `StyleSheet.create` that can't see the theme. Instant theme switching and the Phase 10 inline token edits on shared styles both depend on it.
 
 ## 6. Data layer
 

@@ -24,6 +24,18 @@ An AI app builder runs **untrusted, AI-generated code** for **untrusted users**,
 - Public projects (`visibility = public`) allow anonymous **read** of files and preview only, never runs, edits or exports of private metadata.
 - Add a test per route that calls it as a different user and expects 404, not 403, so existence isn't leaked.
 
+**Role matrix (defaults)**
+
+| Action | viewer | editor | owner |
+|---|---|---|---|
+| View files, chat history, preview, QR | ✅ | ✅ | ✅ |
+| Send chat edits, inline edits, theme switch (spends credits of the **project owner**) | — | ✅ | ✅ |
+| Export zip, push to GitHub | — | ✅ | ✅ |
+| Native build (uses the acting user's Expo token) | — | ✅ | ✅ |
+| Web publish / unpublish | — | — | ✅ (can be delegated to editors in settings) |
+| Connect/disconnect backend, change visibility, share/invite, rename, delete | — | — | ✅ |
+| Download Android signing key | — | — | ✅ + recent re-auth, audit-logged |
+
 ## 3. Secrets and tokens
 
 - `lib/crypto/encrypt.ts`: AES-256-GCM, random 12-byte IV, output `v{n}:{iv}:{ct}:{tag}` (base64). The key comes from `ENCRYPTION_KEY`; the version from `ENCRYPTION_KEY_VERSION`. Decrypt supports old versions, so keys can be rotated with a re-encrypt script.

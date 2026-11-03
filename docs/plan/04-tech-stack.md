@@ -12,12 +12,15 @@
 | UI | **Tailwind CSS + shadcn/ui** + lucide icons | DaisyUI | Matches the video |
 | Panels / canvas | `react-resizable-panels`; `react-zoom-pan-pinch` (or a small custom transform layer) | `@xyflow/react` | Canvas frames are absolutely positioned iframes |
 | Code viewer | **Shiki** (read-only) → Monaco when editing is added | CodeMirror 6 | |
+| Client state | **Zustand** (workspace store: selection, frames, run state) | Jotai | Server data via fetch + SSE, no React Query needed initially |
+| Long lists | `@tanstack/react-virtual` | — | Chat history, file tree |
+| Worker build | `tsx` in dev; **tsup** + `tsconfig.worker.json` for the production bundle | esbuild script | Worker shares `lib/` with the web app |
 | Database | **Postgres** | Neon · Railway · Supabase · CloudHike · RDS | Only `DATABASE_URL` matters |
 | ORM | **Drizzle ORM** + drizzle-kit migrations | Prisma | `push` locally, `generate`+`migrate` in prod |
 | Auth | **Better Auth** (email/password + Google + GitHub) | Provider-hosted Better Auth (e.g. CloudHike) · Clerk · Auth.js | Self-hosted Better Auth keeps users in our DB |
 | Object storage | **S3-compatible** via `@aws-sdk/client-s3` + presigner | R2 · Railway buckets · MinIO (dev) · CloudHike storage | `StorageProvider` adapter |
 | Queue / jobs | **pg-boss** on the same Postgres | Inngest · Trigger.dev · BullMQ+Redis · CloudHike Jobs | `lib/jobs` hides the choice |
-| Realtime | **SSE** + Postgres `LISTEN/NOTIFY` | Pusher/Ably · Redis pub/sub | Events persisted in `run_events` |
+| Realtime | **SSE** + Postgres `LISTEN/NOTIFY` | Pusher/Ably · Redis pub/sub | Events persisted in `run_events`. `LISTEN` needs a **direct/session-mode** connection; it doesn't work through transaction-mode poolers (PgBouncer transaction mode, some serverless drivers). Phase 05 adds a polling fallback. Check this when picking hosted Postgres. |
 | AI | **Anthropic TypeScript SDK**, `AI_MODEL=claude-opus-5-5` | — | See `05-ai-agent-design.md` |
 | Validation | **Zod** (env, API bodies, tool inputs, postMessage) | — | |
 | AST / codemods | `@babel/parser`, `@babel/traverse`, `recast` (formatting-preserving prints) | ts-morph | Inline editing + validators |
@@ -55,6 +58,7 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | Variable | Used by | Phase | Secret | Notes |
 |---|---|---|---|---|
 | `DATABASE_URL` | web, worker | 00 | ✅ | Postgres connection string (pooled for web if using serverless) |
+| `DATABASE_URL_DIRECT` | web (SSE `LISTEN`), worker (pg-boss), migrations | 05 | ✅ | direct/session-mode connection; optional if `DATABASE_URL` is already direct |
 | `NEXT_PUBLIC_APP_URL` | web | 00 | — | e.g. `http://localhost:3000`; prod domain later |
 | `BETTER_AUTH_SECRET` | web | 02 | ✅ | `openssl rand -base64 32` |
 | `BETTER_AUTH_URL` | web | 02 | — | same as app URL |
@@ -76,7 +80,10 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | `EAS_WEBHOOK_SECRET` | web | 15 | ✅ | Verify EAS build webhooks |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` / `STRIPE_PRICE_PRO_MONTHLY` | web | 18 | ✅ | |
 | `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | 18 | — | |
-| `CREDIT_USD_VALUE` | web, worker | 18 | — | model-cost USD per credit, see `11` |
+| `CREDIT_USD_VALUE` | web, worker | 18 | — | model-cost USD per credit, see `11` (default `0.05`) |
+| `CREDIT_MARKUP` | web, worker | 18 | — | multiplier on model cost (default `1.0`) |
+| `PUBLISH_HOSTING_PROVIDER` | worker | 16 | — | optional; default `eas` |
+| `GENERATION_DISABLED` | web, worker | 19 | — | kill switch: run-starting routes return 503 (also settable as a DB flag in `system_flags`) |
 | `SENTRY_DSN` | web, worker | 19 | — | |
 
 Per-user secrets (GitHub user tokens, Expo access tokens, backend provider tokens, Android keystores) are **not** env vars. They live encrypted in the DB (`03-data-model.md` §7).

@@ -39,7 +39,9 @@ preview-runtime/
                        Stack, Tabs, Slot, Link, Redirect, router, useRouter,
                        useLocalSearchParams, useSegments, usePathname, Stack.Screen options
       expo-image.tsx, expo-linear-gradient.tsx, expo-haptics.ts (no-op), expo-constants.ts …
-      async-storage.ts localStorage-backed, namespaced per project+frame
+      async-storage.ts in-memory store; the parent persists snapshots via postMessage
+                       (a sandboxed iframe without allow-same-origin has no usable
+                       localStorage — touching it throws)
     transpile.ts       @babel/standalone: TS + JSX → CommonJS, plus the inspector plugin (§5)
     loader.ts          tiny CommonJS loader: resolves "./x", "@/x", file extensions, index files;
                        caches by sha256; supports invalidate(path) for hot swap
@@ -67,7 +69,8 @@ Parent → runtime:
 | `navigate` | `{ route }` |
 | `inspect.mode` | `{ enabled: boolean }` |
 | `inspect.highlight` | `{ afid }` (sync selection from code view) |
-| `reset.data` | — clears namespaced AsyncStorage |
+| `reset.data` | — clears the frame's in-memory AsyncStorage (and the parent's persisted copy) |
+| `storage.restore` | `{ snapshot }` — parent restores persisted AsyncStorage contents on boot |
 
 Runtime → parent:
 | type | payload |
@@ -78,6 +81,7 @@ Runtime → parent:
 | `element.hover` / `element.select` | `{ afid, rect, component, props: { style (resolved), text? }, isDynamic }` |
 | `runtime.error` | `{ message, stack, path?, line? }` |
 | `console` | `{ level, args }` (dev only) |
+| `storage.snapshot` | `{ snapshot }` (debounced) — parent persists it per project in its own storage |
 
 ## 5. Element instrumentation (for inline editing)
 

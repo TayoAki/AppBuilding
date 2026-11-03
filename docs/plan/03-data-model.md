@@ -3,7 +3,8 @@
 Postgres + Drizzle ORM. This is the **target** schema. Each phase adds only the tables it needs; the "Phase" column says when. Names here are canonical. Phase docs and Claude Code prompts refer to them by these names.
 
 Conventions:
-- Primary keys are `text` ids from a single helper, `newId(prefix)` (e.g. `prj_…`, `run_…`), so logs are readable. Alternatively use `uuid` with `defaultRandom()`. Pick one in Phase 00 and never mix.
+- Primary keys are `text` ids from a single helper, `newId(prefix)` (e.g. `prj_…`, `run_…`), so logs are readable. Alternatively use `uuid` with `defaultRandom()`. Pick one in Phase 00 and never mix (decision D3).
+- Canonical prefixes: `prj` project · `ast` asset · `upl` temporary upload (not a table, see §2) · `msg` message · `run` run · `rev` file revision · `snp` snapshot · `scr` screen · `mbr` project member · `con` oauth connection · `bld` native build · `dep` web deployment · `use` ai_usage · `led` ledger entry. Better Auth keeps its own ids for `user`/`session`/`account`.
 - Every table has `created_at timestamptz default now()`. Mutable tables also get `updated_at`.
 - Soft delete where users can delete things (`deleted_at`).
 - Money is stored as integer **micro-credits**, never floats (see §8).
@@ -36,6 +37,12 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `status` | text | `planning` · `awaiting_confirmation` · `building` · `ready` · `error` |
 | `visibility` | text default `'private'` | `private` · `unlisted` · `public` (public = shown on home showcase) |
 | `active_theme_id` | text null | id inside the project's theme pack |
+| `theme_pack` | jsonb null | parsed palette list for the theme picker (§6) |
+| `current_plan_message_id` | text null fk → messages | the confirmed `plan_card` message (Phase 06) |
+| `snack` | jsonb null | `{snackId, url, savedAt, snapshotId}` of the last persistent Snack save (Phase 11) |
+| `bundle_id`, `android_package` | text null | iOS bundle identifier / Android package. Derived from slug, **locked after the first store build** (Phase 15) |
+| `eas_project_id` | text null | EAS project id on the user's Expo account (Phase 15) |
+| `remixed_from_project_id` | text null | set when duplicated from a public project (Phase 17) |
 | `template_version` | text | e.g. `expo-55@1` — which template the project was generated against |
 | `thumbnail_key` | text null | storage key of latest screenshot |
 | `deleted_at` | timestamptz null | |
@@ -47,13 +54,17 @@ User uploads (reference images) and generated assets.
 |---|---|---|
 | `id` | text pk | `ast_…` |
 | `project_id` | fk | |
-| `kind` | text | `reference_image` · `app_image` · `icon` · `splash` |
+| `kind` | text | `reference_image` · `chat_attachment` · `app_image` · `icon` · `splash` |
 | `storage_key` | text | `users/{userId}/projects/{projectId}/assets/{assetId}.{ext}` |
 | `mime_type`, `size_bytes`, `width`, `height` | | validated server-side |
 | `status` | text | `pending_upload` · `ready` · `rejected` |
+| `external_url`, `prompt`, `provider`, `provider_ref` | text null | generated images (Phase 12): provider URL, generation prompt, provider name, provider id |
+| `seed_key` | text null | stable registry key for generated images; unique per project |
+
+Uploads made **before** a project exists (the home prompt box) don't create rows. They go to `tmp/{userId}/{uploadId}` with an HMAC upload token, and `POST /api/projects` verifies them, copies them to final keys and inserts `project_assets` rows in the same transaction as the project (Phase 03). A bucket lifecycle rule expires `tmp/` after 1 day. `pending_upload` is only used for attachments added inside an existing project (chat, Phase 09).
 
 ### `project_members` (Phase 14)
-| `project_id` | `user_id` null | `email` | `role` (`viewer`/`editor`) | `invited_by` | `accepted_at` |
+| `project_id` | `user_id` null | `email` | `role` (`viewer`/`editor`) | `invited_by` | `invite_token_hash` | `invite_expires_at` | `accepted_at` |
 Unique (project_id, email). The owner is implicit via `projects.owner_id`.
 
 ## 3. Conversation (Phase 06)
@@ -129,7 +140,7 @@ The current state of each file.
 | `parent_revision_id` | fk null | |
 
 ### `project_snapshots` (Phase 08, used by export/undo)
-A named point-in-time map `{path → revision_id}` (jsonb). Created at the end of every successful run, so "Restore previous version" is one row copy.
+A point-in-time map `files: {path → revision_id}` (jsonb), plus `screens` (jsonb, the screen list at that time, so restore can bring back deleted screens), `label` (text, e.g. "After: add settings screen"), and `run_id`. Created at the end of every successful run, so "Restore previous version" is one row copy.
 
 ### `screens`
 Denormalized list for the canvas and plan ↔ code linkage.
@@ -148,6 +159,9 @@ One table for every third-party account the user links.
 | `id` | text pk | |
 | `user_id` | fk | |
 | `provider` | text | `github` · `expo` · `backend:<name>` (e.g. `backend:supabase`, `backend:cloudhike`) |
+
+> `provider = 'github'` here is the **export GitHub App** user-to-server token (Phase 14). It's unrelated to Better Auth's GitHub *sign-in* account, which lives in Better Auth's `account` table.
+
 | `external_account_id`, `external_login` | text | |
 | `access_token_enc`, `refresh_token_enc` | text | encrypted |
 | `scopes` | text | |
@@ -164,11 +178,11 @@ Unique (user_id, provider).
 | `id` | `project_id` | `platform` (`android`/`ios`) | `artifact` (`apk`/`aab`/`ipa`) | `version`, `build_number` | `eas_build_id` | `status` | `artifact_url` | `logs_url` | `error` |
 
 ### `project_signing` (Phase 15)
-| `project_id` pk | `android_keystore_enc` (base64 jks, encrypted) | `android_keystore_password_enc` | `android_key_alias` | `android_key_password_enc` |
+| `project_id` pk | `android_keystore_enc` (base64 jks, encrypted) | `android_keystore_password_enc` | `android_key_alias` | `android_key_password_enc` | `ios_asc_key_enc` (p8) | `ios_asc_key_id` | `ios_asc_issuer_id` | `apple_team_id` |
 Back this up. Losing the keystore means you can never update the app on Google Play.
 
 ### `web_deployments` (Phase 16)
-| `id` | `project_id` | `provider` (`eas_hosting`) | `url` | `alias` | `status` | `snapshot_id` |
+| `id` | `project_id` | `provider` (`eas_hosting`) | `url` | `alias` | `status` | `snapshot_id` | `log_tail` (last ~200 lines for the UI) |
 
 ## 8. Billing and credits (Phase 06 logs usage; Phase 18 enforces)
 
@@ -182,6 +196,11 @@ Append-only. `credits_balance = sum(amount)`.
 
 ### `subscriptions`
 | `user_id` pk | `provider` (`stripe`) | `customer_id` | `subscription_id` | `plan` | `status` | `current_period_end` |
+
+## 8b. Ops (Phase 19)
+
+- `system_flags` (`key` pk, `value` jsonb, `updated_by`, `updated_at`): e.g. `generation_disabled`, read with a short cache.
+- `worker_heartbeats` (`worker_id` pk, `host`, `version`, `last_seen_at`): powers the "worker down" alert and admin page.
 
 ## 9. Indexes to create from the start
 

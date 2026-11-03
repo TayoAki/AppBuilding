@@ -46,8 +46,9 @@ When the user clicks **Confirm & build**, the Builder agent turns the confirmed 
 load run + confirmed plan (messages.kind = plan_card, confirmed)
 truncate plan.screens to plan cap (MAX_SCREENS_DEFAULT for first build)
 upsert screens rows (status = planned) → emit run.status(running)
-S1 Foundation  (allowedPaths: theme/, data/, lib/store/, components/shared/, app/_layout.tsx, app/(tabs)/_layout.tsx)
+S1 Foundation  (allowedPaths: theme/themes.ts, data/, lib/store/, components/shared/, app/_layout.tsx)
    → after themes.ts written: post-process contrast (step 6) → emit theme.ready
+   → platform writes theme/active.ts + regenerates app/(tabs)/_layout.tsx from screens + plan.navigation
 S2 Screens     p-limit(AGENT_SCREEN_CONCURRENCY) over screens:
    shared cached prefix + "Build screen <id>" → screen.started … file.written … screen.done
    (allowedPaths: that screen's route file + components/<screenId>/)
@@ -164,7 +165,7 @@ Finish with lint, typecheck, tests, and a summary including any prompt changes y
 - **Cache silently missing:** a timestamp, a project name in `system`, or tools assembled in a different order breaks the shared prefix. Keep all project-specific content in `messages`.
 - **Partial JSON parsing** for `file.writing`: use a tolerant parser on the accumulated `input_json` deltas. Only the *final*, schema-validated input is written.
 - **Parallel screens editing shared files:** S2 loops may only write their own route file and `components/<screenId>/`. If a screen needs a shared component change, it reports it, and S3 makes the change. That avoids write races.
-- **Tab layout drift:** S1 writes `app/(tabs)/_layout.tsx` from `plan.navigation`. Don't let S2 rewrite it.
+- **Tab layout drift:** the platform (not the agent) generates `app/(tabs)/_layout.tsx` deterministically from the `screens` list + `plan.navigation`, after S1 and on every add/remove screen (Phase 09). It's outside every agent allowlist (`06` §3).
 - Keep the first-build cap (`MAX_SCREENS_DEFAULT=3`) during development for speed and cost. The video does the same, and users can ask for more screens via chat in Phase 09.
 - If quality is poor, improve the **exemplars and component library** before adding more prompt rules. Long rule lists make output worse on current models.
 - Expect to revisit `uiux-guide.md` repeatedly. Every change must be followed by an eval run.

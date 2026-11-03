@@ -83,7 +83,7 @@ Code controls the stages. Each stage is a short tool loop. This gives per-screen
 
 | Stage | What the agent writes | Allowed paths |
 |---|---|---|
-| **S1 Foundation** | `theme/themes.ts` (5 theme packs), `theme/active.ts`, `data/seed.ts`, `data/types.ts`, `lib/store/*` (local store per entity), `components/ui/*` (shared components), `app/_layout.tsx`, tab layout | `theme/`, `data/`, `lib/store/`, `components/`, `app/_layout.tsx`, `app/(tabs)/_layout.tsx` |
+| **S1 Foundation** | `theme/themes.ts` (5 theme packs), `data/types.ts`, `data/seed.ts`, `lib/store/*` (local store per entity), `components/shared/*`, `app/_layout.tsx`. The platform then writes `theme/active.ts` and regenerates `app/(tabs)/_layout.tsx` from the `screens` list. | `theme/themes.ts`, `data/`, `lib/store/`, `components/shared/`, `app/_layout.tsx` |
 | **S2 Screens** (one loop per screen, concurrency 2–3) | `app/<route>.tsx`, plus optional screen-local components | its own route file + `components/<screenId>/` |
 | **S3 Integrate & fix** | Fixes from the validation report (§4). Loops until clean or `MAX_FIX_ITERATIONS` (3). | any allowed path |
 
@@ -97,6 +97,8 @@ Input context:
 - selected element context when present: `{afid, filePath, line, snippet}` from the inspector,
 - the current plan and screen list,
 - the file tree, plus full contents of the files most likely to be relevant (selected screen + its components + theme).
+
+The Editor uses the **same tools, in the same order, and the same system blocks byte-for-byte** as the Builder, so its runs hit the cached prefix too.
 
 The Editor decides for itself whether the request is a question (answer, no tools), a small change, or a new screen. No separate classifier call is needed. It ends with a structured `build_summary` message: what changed and which screens.
 
@@ -117,7 +119,8 @@ Tools are **dedicated, typed and project-scoped**. There is no bash tool: the ag
 | `remove_screen` | `{ id }` | Inverse |
 | `validate` | `{ paths? }` | Runs §4 validators and returns a compact error list. The agent is told to call it before finishing. |
 | `set_screen_status` | `{ screenId, status, note? }` | Drives canvas placeholders → ready |
-| `image_url` (Phase 12) | `{ prompt, width, height, transform? }` | Returns an image-provider URL string to embed (no binary) |
+| `image_url` (Phase 12) | `{ prompt, key, width, height, transform? }` | Returns an image-provider URL and registers it under `key` in `data/images.ts` (no binary) |
+| `use_uploaded_image` (Phase 12) | `{ assetId, key, width?, height?, removeBackground? }` | Turns a user upload from this project into an app image in `data/images.ts` |
 | `backend_migration` (Phase 13) | `{ name, sql }` | Writes `backend/migrations/NNN_name.sql`. Provisioning applies it; the agent never touches the remote DB directly. |
 
 Tool definitions:
@@ -277,6 +280,7 @@ Never put file contents in events. The client fetches `/api/projects/:id/files/:
 | Fix iterations | 3 | `AGENT_MAX_FIX_ITERATIONS` |
 | Parallel screen builds | 2 | `AGENT_SCREEN_CONCURRENCY` |
 | Max file size written | 60 KB | — |
+| AI images per run (build / edit) | 12 / 4 | plan config |
 | Credit reservation per run | estimate × 1.5 | see `11-costs-and-pricing.md` |
 
 Optionally, add a per-run `task_budget` (beta `task-budgets-2026-03-13`, Opus 5.5 supported) so the model paces itself within a token ceiling instead of being cut off by `max_tokens`.
