@@ -1,170 +1,153 @@
 # 06 — Generated App Template (the "contract")
 
-Every app the platform generates is an Expo app built **inside one fixed template**. The agent fills in screens, components, theme and data. The platform owns everything else.
+Every generated app is an Expo app inside **one fixed structure**. The generators write screens and shared components. The **platform** writes everything derived from data (themes, schema, seed data, tab layout, backend config) and every config file.
 
-This one decision is what makes browser preview, Expo Go (QR), zip export, GitHub push, EAS builds and web publish all work from the same files. It also keeps the agent from adding dependencies or scripts that would run arbitrary code on our build workers.
+This is what lets one set of files run in the browser preview, on Expo Snack/Expo Go, in zip/GitHub exports, in EAS builds and on the web. It also stops the agent from adding dependencies or scripts.
 
-Template location in the platform repo: `templates/expo-app/`. It's versioned (`templates/expo-app/VERSION`), and each project stores `template_version`.
+> **Revised after the reference implementation** (`13-reference-implementation.md`). Changes from v1: the agent no longer writes data stores (generic hooks from `@/lib/backend` instead); there's no fixed platform UI library (each app gets a generated shared-component library); themes are imported as a `colors` object, with CSS variables in the preview; the platform writes schema, seed and themes from JSON.
+
+Template source: `templates/expo-app/` (versioned; `projects.template_version`).
 
 ---
 
-## 1. Expo SDK pinning (decide in Phase 07)
+## 1. Expo SDK pinning
 
-- Pin **one** Expo SDK version that is supported by **Expo Snack** (for QR/device preview) and the **current Expo Go** app in the stores. Check the Snack SDK list and Expo Go release notes at implementation time.
-- The video hit exactly this problem: generated code targeted a newer SDK than Snack supported, which broke the QR flow. Pick the version deliberately and write it into `templates/expo-app/package.json`.
-- Moving to a new SDK means a new template version plus a migration script for existing projects. Never do it silently.
+- Pin the newest SDK that **the published `snack-sdk` supports**, and check that store **Expo Go** opens it. The reference app is pinned to **SDK 54**, because `snack-sdk` didn't go past 54 and newer Expo Go builds refuse older SDKs. Re-check both at Phase 07 start (decision D7).
+- Dependency versions for export/builds come from `expo/bundledNativeModules.json` of the pinned `expo` version. Moving SDKs means a new template version, new dependency versions, and the Snack SDK constant, together.
+- The Planner/generator prompts say "Expo SDK `<pinned>`, Expo Router".
 
-## 2. Folder layout of a generated app
+## 2. Layout of a generated app
 
 ```
-app/                         ← agent-owned: Expo Router routes
-  _layout.tsx                  root Stack + ThemeProvider + SafeAreaProvider
-  (tabs)/_layout.tsx           ← platform-written: Tabs, regenerated deterministically from
-                                 the `screens` list + plan.navigation (S1, add/remove screen)
-  (tabs)/index.tsx             first tab screen
-  (tabs)/<screen>.tsx
-  <stack-screen>.tsx           e.g. habit/[id].tsx, add-habit.tsx (modal)
+app/
+  _layout.tsx                ← platform: root Stack, providers, first-screen redirect
+  (tabs)/_layout.tsx         ← platform: shared tab bar from plan screens with `tab` (tab apps only)
+  (tabs)/<screen-id>.tsx     ← Screen Builder: tab screens (the group doesn't change routes)
+  <screen-id>.tsx            ← Screen Builder: stack screens (sign-in, details, …)
 components/
-  ui/                        ← platform-owned component library (read-only to agent)
-  <screenId>/                ← agent-owned screen-local components
-  shared/                    ← agent-owned app-wide components
+  <Name>.tsx                 ← Component Designer/Builder: shared components (flat, PascalCase)
 theme/
-  tokens.ts                  ← platform-owned: Theme type + helpers (contrast, alpha)
-  themes.ts                  ← agent-owned: the 5 theme packs
-  active.ts                  ← platform-owned writer: export const ACTIVE_THEME_ID = "…"
-  ThemeProvider.tsx, useTheme.ts   ← platform-owned
+  index.ts                   ← platform-owned: exports `colors` (active theme) + `useThemeId`
+  themes.ts                  ← platform-written from Foundation JSON: themes[] + activeThemeId
 data/
-  types.ts                   ← agent-owned: entity types (from plan.entities)
-  seed.ts                    ← agent-owned: realistic sample data
-  images.ts                  ← agent-owned (Phase 12): image registry { key: {uri, width, height} }
-lib/
-  store/                     ← agent-owned: one collection per entity, via createCollection()
-  data/                      ← platform-owned: adapter interface + LocalAdapter + RemoteAdapter
-    config.ts                ← platform-written: which adapter + public backend config
-  images.ts                  ← platform-owned (Phase 12): image URL helper + <RemoteImage>
-backend/                     ← agent-owned (Phase 13)
-  migrations/NNN_*.sql
-assets/                      ← platform-managed: icon, splash, uploaded images
-package.json, app.json, eas.json, babel.config.js, tsconfig.json, metro.config.js
-                             ← platform-owned, generated at materialization
-README.md                    ← platform-generated at export
+  schema.ts                  ← platform-written: TS types from plan.collections
+  seed.ts                    ← platform-written: sample records from plan.collections
+lib/backend/                 ← platform-owned (never written by the agent)
+  index.ts                     hooks: useCollection, useStoredValue, useAuth, uploadFile, sendEmailToMe
+  provider.ts                  BackendProvider interface
+  local.ts                     device storage (AsyncStorage) seeded from data/seed.ts
+  <provider>.ts                remote provider client (Phase 13)
+  config.ts                  ← platform-written: which provider + public config only
+assets/                      ← icon, splash (platform)
+package.json, app.json (static), eas.json, babel.config.js, tsconfig.json, README.md
+                             ← platform-generated at materialization
 ```
 
-## 3. Ownership rules (enforced by `lib/vfs` and validators)
+Routes: `screenRoute(id)` maps a plan screen to `/(tabs)/<id>` or `/<id>`. The first screen (`plan.firstScreenId`) is the redirect target in `app/_layout.tsx`.
 
-| Path | Agent may write | User code editor may write | Notes |
+## 3. Ownership (enforced by `lib/vfs` + validators)
+
+| Path | Generators | Inline editor / user | Notes |
 |---|---|---|---|
-| `app/**` (except `app/(tabs)/_layout.tsx`) | ✅ | ✅ | |
-| `app/(tabs)/_layout.tsx` | ❌ (platform regenerates from `screens`) | ❌ | Keeps tab order consistent (Phase 09) |
-| `components/<screenId>/**`, `components/shared/**` | ✅ | ✅ | |
-| `components/ui/**` | ❌ | ❌ (v1) | The library is versioned with the template |
-| `theme/themes.ts` | ✅ | ✅ | |
-| `theme/active.ts` | ❌ (platform writes on theme switch) | ❌ | |
-| `data/**`, `lib/store/**` | ✅ | ✅ | |
-| `lib/data/**` | ❌ | ❌ | Rewritten by backend connect |
-| `backend/migrations/**` | ✅ (Phase 13) | ✅ | Applied by provisioning job, never by the agent |
-| `package.json`, `app.json`, `eas.json`, configs | ❌ | ❌ | Generated from project metadata at materialization |
+| `app/(tabs)/<id>.tsx`, `app/<id>.tsx` | Screen Builder | ✅ (splice edits) | |
+| `components/<Name>.tsx` | Component Designer/Builder | ✅ | |
+| `app/_layout.tsx`, `app/(tabs)/_layout.tsx` | ❌ | ❌ | Regenerated from the plan on every change. Adding or renaming a tab rewrites no screen. |
+| `theme/themes.ts` | ❌ (Foundation returns JSON) | via theme picker / `set_theme` | |
+| `data/schema.ts`, `data/seed.ts` | ❌ (Foundation/Data return JSON) | ❌ | |
+| `theme/index.ts`, `lib/backend/**` | ❌ | ❌ | Template code |
+| configs | ❌ | ❌ | **Static `app.json` only**, never `app.config.js` (that would execute code during export/builds) |
 
-Use a **static `app.json` only**, never `app.config.js`/`app.config.ts`. A JS config would execute code during `expo export`/EAS builds.
-
-Platform-owned files are **not stored per project**. They're rendered from the template plus project metadata (name, slug, bundle id, icon, theme colors for splash) every time we materialize. So a template patch fixes every project at once.
+Only agent- and user-authored files live in `project_files`. Everything else is rendered at materialization from the template + `projects.plan`, so a template fix reaches every project.
 
 ## 4. Allowed imports (`templates/expo-app/ALLOWED_IMPORTS.json`)
 
-Only modules that ship in Expo Go **and** work on react-native-web:
+Must ship in Expo Go for the pinned SDK **and** have a working web shim in the preview runtime:
 
-```json
-[
-  "react", "react-native",
-  "expo-router", "expo-status-bar", "expo-image", "expo-linear-gradient",
-  "expo-haptics", "expo-constants", "expo-linking",
-  "@expo/vector-icons",
-  "react-native-safe-area-context",
-  "react-native-svg",
-  "@react-native-async-storage/async-storage",
-  "date-fns"
-]
 ```
+react, react-native, expo-router, react-native-safe-area-context, @expo/vector-icons,
+expo-haptics, expo-image-picker, expo-clipboard, expo-linking, expo-location,
+expo-notifications, expo-status-bar
+```
+plus the app's own `@/theme`, `@/lib/backend`, `@/data/schema` and `@/components/<Name>` (only components listed **before** the importing one, for components).
 
-Add modules only when the preview runtime has a working web shim **and** the Snack/Expo Go SDK includes them. Each addition is a template version bump.
-
-**Expected addition in Phase 13:** the chosen backend's JS client (e.g. `@supabase/supabase-js`). It gets imported only by platform-owned `lib/data/remote*.ts`, never by agent code. It's added to the preview runtime's vendor bundle, and the backend URL is added to the runtime CSP `connect-src` (`07` §6).
+Phase 13 adds nothing to this list: the remote provider client is imported only by platform-owned `lib/backend/<provider>.ts`. The preview runtime bundles it, and the CSP `connect-src` allows the backend URL (`07` §6).
 
 ## 5. Theme system
 
-```ts
-// theme/tokens.ts (platform-owned)
-export type Theme = {
-  id: string; name: string; mode: "light" | "dark";
-  colors: {
-    background: string; surface: string; surfaceAlt: string; border: string;
-    primary: string; onPrimary: string; secondary: string; onSecondary: string;
-    text: string; textMuted: string; success: string; warning: string; danger: string;
-  };
-  radius: { sm: number; md: number; lg: number; pill: number };
-  spacing: (n: number) => number;          // 4-pt scale
-  font: { family?: string; sizes: { xs: number; sm: number; md: number; lg: number; xl: number; xxl: number } };
-};
-```
+**Tokens** (every theme defines all of them as `#rrggbb`):
+`background, surface, surfaceAlt, border, text, textMuted, primary, onPrimary, primarySoft, accent, onAccent, accentSoft, success, successSoft, warning, warningSoft, danger, dangerSoft, overlay, shadow`
 
-- The agent writes **5 themes** in `theme/themes.ts`. The first matches `plan.themeSeed`, the rest are variations (e.g. "Mint Leisure", "Harbor Night" in the video).
-- When `themes.ts` is written, the platform **post-processes** it with a deterministic contrast fix: `onPrimary`/`text` are adjusted until WCAG AA contrast (≥ 4.5:1) holds. "Text colors adjust automatically to stay readable" in the video is this step.
-- The theme picker writes `theme/active.ts` only. The preview hot-swaps it instantly, with no LLM call and no credits.
-- **Contract rule:** build theme-dependent styles **inside** the component, `const styles = useMemo(() => makeStyles(theme), [theme])`, never in a module-level `StyleSheet.create` that can't see the theme. Instant theme switching and the Phase 10 inline token edits on shared styles both depend on it.
+The Foundation Designer returns the base tokens. The platform derives soft tints and `on*` colors deterministically and fixes contrast (WCAG AA ≥ 4.5:1 for text on background, surface and primary). It also tints neutrals toward the primary hue if the model returned pure grays.
+
+**Usage in code:** `import { colors } from "@/theme"`, which is usable inside `StyleSheet.create`. There's no hook and no `makeStyles`, because the static `StyleSheet` keeps every element on one line with its own named style (§9).
+
+**How switching works without regenerating:**
+- **Preview runtime:** `colors.primary` resolves to `"var(--c-primary)"` and so on. react-native-web passes these through to CSS, so a theme switch only sets CSS variables on the frame's root. It's instant, with no re-render or re-transpile.
+- **Native (Snack, builds):** `theme/index.ts` resolves `colors` from `themes.ts` `activeThemeId` at load. A switch rewrites `activeThemeId`, and Snack live-reloads.
+- `set_theme` can also **add** a theme (e.g. "make it purple"), which goes through the same derivation and contrast pipeline.
+
+**Person-chosen colors:** an inline edit or an explicit "make this button #2563EB" writes a literal hex on that element. It's allowed by the validator (it was already in the file or named in the request) and **doesn't follow theme switches**. The inspector says so.
 
 ## 6. Data layer
 
-```ts
-// lib/data/adapter.ts (platform-owned)
-export interface DataAdapter {
-  list<T>(collection: string, opts?: { orderBy?: string }): Promise<T[]>;
-  get<T>(collection: string, id: string): Promise<T | null>;
-  insert<T>(collection: string, value: Omit<T, "id">): Promise<T>;
-  update<T>(collection: string, id: string, patch: Partial<T>): Promise<T>;
-  remove(collection: string, id: string): Promise<void>;
-  subscribe?(collection: string, cb: () => void): () => void;
-}
-// LocalAdapter: AsyncStorage, seeded from data/seed.ts on first run.
-// RemoteAdapter: thin client for the connected backend provider (Phase 13).
-```
+The Foundation Designer outputs `collections`:
 
 ```ts
-// lib/store/habits.ts (agent-written, uses platform helper)
-export const habits = createCollection<Habit>("habits", { seed: seedHabits });
-// → habits.useAll(), habits.useOne(id), habits.add(v), habits.update(id, p), habits.remove(id)
+type Collection = {
+  name: string;          // "habits" (camelCase plural)
+  typeName: string;      // "Habit"
+  fields: { name: string; type: "string" | "number" | "boolean" | "string[]"; references: string | null }[];
+  items: Record<string, unknown>[];   // 5–8 realistic records, ids like "habit-1"
+  shared: boolean;       // everyone sees the same records (catalog/feed) vs private per person
+};
 ```
 
-Screens may only touch data through `lib/store/*`. When the user connects a backend, the platform swaps the adapter in `lib/data/config.ts`, and the agent writes migrations for one table per entity. Screens don't change.
+Generated screens use only `@/lib/backend`:
 
-## 7. Auth hooks (Phase 13)
+```ts
+const { items, add, update, remove, loading } = useCollection<Habit>("habits");
+const [units, setUnits] = useStoredValue("units", "metric");      // single saved values / settings
+const { user, loading, signIn, signUp, signOut } = useAuth();      // local fake session until a backend exists
+const { url } = await uploadFile(uri);
+```
 
-`lib/data/auth.ts` (platform-owned) exposes `useSession()`, `signIn`, `signUp`, `signOut`, `signInWithOAuth(provider)`. With the LocalAdapter it's a fake single-user session, so auth screens work in preview before any backend exists.
+- `local.ts` stores collections in AsyncStorage on device. In the preview, the parent workspace persists the data (`07` §3), and seeds from `data/seed.ts` on first run.
+- `useCollection` is a live list shared across screens (an external store), so a change on one screen shows on the others.
+- Writes are validated against the collection's fields and types, on device too. That keeps behaviour identical once the remote provider refuses bad writes (Phase 13).
+- Connecting a backend swaps `lib/backend/config.ts`, and **no screen changes**. Tables are derived from `collections` by the platform, never written by the agent (Phase 13).
+- The Data Designer may only **add** collections, fields and records. Each new field needs a value on existing records, and screens must handle a missing field on older records.
 
-## 8. Component library (`components/ui`)
+## 7. Images
 
-Ship a polished, theme-aware library so generated apps look consistent and professional:
+- When `IMAGEKIT_ENABLED=true`, generators write image URLs as **one plain string** of the form `<IMAGEKIT_URL_ENDPOINT>/ik-genimg-prompt-<description with %20, no commas/slashes/colons/quotes>/<short-name>.jpg` (verify the current syntax in ImageKit docs, Q2).
+- Before saving a step's code or data, the server finds those URLs (at most 8 per step, placeholders past that). It waits for each image to finish generating, because a phone can't render ImageKit's "still preparing" page, then copies it into the project's folder and rewrites the URL to the stored copy. See Phase 12.
+- Otherwise, placeholders: `https://picsum.photos/seed/<word>/400/300`. No local assets in generated code.
 
-`Screen` (safe area + scroll + background), `Header`, `Text` (variants), `Button` (primary/secondary/ghost/destructive, sizes), `IconButton`, `Card`, `ListItem`, `TextField`, `NumberField`, `Select`, `Switch`, `Chip`, `SegmentedControl`, `Badge`, `Avatar`, `StatCard`, `ProgressBar`, `ProgressRing` (svg), `EmptyState`, `Sheet` (modal), `FAB`, `Divider`, `Skeleton`, `Toast`.
+## 8. Shared components
 
-Every component:
-- reads `useTheme()` only (no literal colors),
-- forwards `testID` and `dataSet` props, which the inspector needs (`07-preview-runtime.md` §5),
-- has a one-paragraph doc block. These are concatenated into the **COMPONENT API DOCS** prompt block.
+- Generated per app by the Component Designer: 5–10 components, simple ones first, each importing only earlier ones. Always a button, a screen header and an empty state; **never a tab bar**.
+- Props-only: records, copy and callbacks come in as props. No data hooks, no navigation. Export the `<Name>Props` type first, default-export the component, 20–80 lines, and give the outer element a `style` prop.
+- Screens see only each component's **props type + purpose** (extracted by regex/AST), not its code.
+- Editing a component keeps every existing prop working. New props are optional.
 
-## 9. `CONTRACT.md`
+## 9. Editability rules (enforced by prompt + validator)
 
-`templates/expo-app/CONTRACT.md` is the human-readable version of §2–§8. It's injected verbatim into the agent's system prompt (cached). Keep it **under ~4k tokens**, concrete and example-driven. Update it whenever the template changes. The eval suite catches regressions.
+- Each visible element is **its own JSX element on its own line with its own named style** in `StyleSheet.create`.
+- Fixed copy is written directly in JSX. `.map` only for real lists. No config-object rendering.
+- These rules are what make element selection and source splicing reliable (`07` §5, Phase 10).
 
 ## 10. Materialization (`lib/vfs/materialize.ts`)
 
 ```
-materialize(projectId, snapshotId?) → { files: Map<path, string> }
-  1. render platform-owned files from templates/expo-app (Handlebars-style placeholders:
-     {{appName}}, {{slug}}, {{bundleId}}, {{scheme}}, {{version}}, {{buildNumber}}, {{splashBg}})
-  2. overlay project_files (at snapshot or current)
-  3. write lib/data/config.ts from project_backends.public_config (or local)
-  4. add assets (icon/splash/images) from storage
-  5. add README.md (how to run: npm install && npx expo start)
+materialize(projectId, { target: "preview" | "snack" | "export" | "eas" | "web", snapshotId? })
+  1. render platform files from template + projects.plan (themes, schema, seed, layouts, config)
+  2. overlay project_files (screens, components)
+  3. target-specific transforms:
+     - snack:  path aliases → relative imports; App.js entry replaces app/_layout.tsx;
+               "expo-router" → small shim on React Navigation (bottom-tabs for tab apps)  (Phase 11)
+     - export/eas/web: package.json with versions from bundledNativeModules.json; eas.json;
+               identity (`projects.slug`, `android_package`, `bundle_id`, set once at first build) (Phase 15);
+               app.json web.output = "single" (SPA: screens never render in Node)
+     - export: README (npm install && npx expo start)
+  4. assets
 ```
-
-Zip export, GitHub push, Snack sync, EAS build and web publish all call `materialize()`.

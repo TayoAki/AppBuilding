@@ -8,7 +8,7 @@ It's based on a review of the TubeGuruji course *"Build Lovable for Mobile Apps 
 
 ## How to read this
 
-1. **`01-video-review.md`** (10 min): what the video builds, what goes wrong in it, what we change.
+1. **`01-video-review.md`** (10 min): what the video builds, what goes wrong in it, what we change. Then **`13-reference-implementation.md`**: what the course's actual prompts and architecture notes taught us.
 2. **`02-architecture.md`** + **`03-data-model.md`**: the system we're building, and the canonical names.
 3. Skim **`05`–`08`**: agent, app template, preview runtime, security. The phases refer back to them constantly.
 4. Work through **`phases/`** in order, one PR per phase, using the loop in **`09-dev-workflow.md`**.
@@ -28,7 +28,8 @@ It's based on a review of the TubeGuruji course *"Build Lovable for Mobile Apps 
 | [09-dev-workflow.md](09-dev-workflow.md) | Claude Code + git + PR + review loop, `CLAUDE.md` template, manual QA script |
 | [10-testing-and-evals.md](10-testing-and-evals.md) | Test layers, agent eval harness and quality targets, model mocking for CI |
 | [11-costs-and-pricing.md](11-costs-and-pricing.md) | Cost per app/edit estimate, credit formula, what plan limits really cost |
-| [12-decisions-and-open-questions.md](12-decisions-and-open-questions.md) | Decisions D1–D17 with defaults, open research questions, ADR log |
+| [12-decisions-and-open-questions.md](12-decisions-and-open-questions.md) | Decisions D1–D18 with defaults, open research questions, ADR log |
+| [13-reference-implementation.md](13-reference-implementation.md) | What the course's real source roadmap + prompt book revealed: chapter map, 22 adopted patterns (R1–R22), where we differ, pitfalls they hit |
 
 ## Phases
 

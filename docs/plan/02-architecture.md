@@ -65,10 +65,10 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 | A2 | **Postgres-backed queue (pg-boss)** plus a dedicated worker service. | It needs no new vendor, jobs are transactional with app writes, and local dev needs no tunnel: the worker connects to the DB directly. You can swap in Inngest/Trigger.dev later behind `lib/jobs`. | CloudHike Jobs → webhook to public URL (requires ngrok locally) |
 | A3 | **Run events are persisted** (`run_events` table) and streamed over SSE with `Last-Event-ID` resume. | Refreshing or reconnecting loses nothing. The SSE handler can be short-lived on serverless because the client reconnects and resumes. | Unclear; the video had to refresh to see progress |
 | A4 | **Project source lives in Postgres as a virtual file system** (`project_files` + `file_revisions`), not on disk. | Every edit is versioned (undo, diff, "restore version"). Export, Snack and builds all start from the same canonical state. | Files saved in DB + storage |
-| A5 | **The generated app follows a fixed template contract** (see `06-generated-app-template.md`). The agent may only write inside allowed folders, use allowlisted imports, and never edits `package.json`. | This is the biggest lever for quality and security. It makes the browser preview, Snack, export and EAS builds work reliably, and it stops the agent from adding dependencies or build scripts that would run arbitrary code in the worker. | Free-form generation; hit Expo SDK version mismatches |
+| A5 | **The generated app follows a fixed template contract** (see `06-generated-app-template.md`). Generators write only screens and shared components; the platform writes themes, schema, seed data, layouts and configs from `projects.plan`; allowlisted imports only; `package.json` is never agent-written. | This is the biggest lever for quality and security. It makes the browser preview, Snack, export and EAS builds work reliably, and it stops the agent from adding dependencies or build scripts that would run arbitrary code in the worker. | Free-form generation; hit Expo SDK version mismatches |
 | A6 | **Our own browser preview runtime** for the canvas and the interactive preview. **Expo Snack is used only for real devices** (QR). | The canvas shows N screens at once and needs element-level instrumentation for inline editing. It also needs instant theme switching. Snack is one session per app and is SDK-version-limited. | Appears to be a web preview plus Snack for QR |
 | A7 | **Themes are data, not code.** Generated code reads colors/spacing from `theme/tokens`. Switching a theme rewrites one file, with no LLM call. | Theme switching is instant and free, which the video highlights as a feature. | Same idea |
-| A8 | **Anthropic TS SDK directly**: model `claude-opus-5-5`, adaptive thinking, streaming, prompt caching, strict tools, structured outputs for the plan, server-side refusal fallbacks. Model id comes from env. | First-party features (caching, structured outputs, fallbacks, usage reporting for credit metering) with no gateway in between. | OpenAI Agents SDK through CloudHike's OpenAI-compatible gateway |
+| A8 | **Anthropic TS SDK directly**: `claude-opus-5-5` (env), adaptive thinking, streaming, prompt caching, strict tools for the Planner, structured outputs for JSON generators, server-side refusal fallbacks. | First-party features (caching, structured outputs, fallbacks, usage reporting for credit metering) with no gateway in between. | OpenAI Agents SDK through an OpenAI-compatible endpoint (CloudHike, later Anthropic's) |
 | A9 | **Provider adapters** for every third-party dependency: `StorageProvider`, `BackendProvider` (generated apps), `ImageProvider`, `BuildProvider`, `HostingProvider`, `BillingProvider`. | The video ties every layer to one sponsor (CloudHike). Adapters let you start with any vendor and switch without touching the agent or UI. | Hard-wired to CloudHike |
 | A10 | **All third-party tokens are encrypted at rest** (AES-256-GCM, versioned key), and **every project route goes through `requireProjectAccess()`**. | These are the classic AI-builder bugs: leaked OAuth tokens and IDOR on project IDs. | Added an encryption key later; CodeRabbit flagged ownership issues |
 
@@ -80,31 +80,28 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 
 ```
 User submits prompt (+ ≤5 images)
-  → POST /api/projects            (create project, assets already uploaded via presigned PUT)
-  → insert run(kind=plan), enqueue job "agent.plan" {runId}
+  → POST /api/projects            (create project; assets uploaded on Send via presigned PUT)
+  → insert run(kind=plan), enqueue job "agent.chat" {runId}
   → redirect /workspace/:projectId
 Browser opens SSE /api/runs/:runId/events
-Worker: agent.plan
-  → Claude (structured output: AppPlan JSON)
-  → insert message(role=assistant, kind=plan_card, payload=AppPlan)
-  → run_events: status, thinking_summary, plan_ready
-User: "only first 3 screens" → POST /api/projects/:id/messages
-  → run(kind=plan_revision) → agent.plan (with previous plan in context) → new plan_card
-User: [Confirm & build]
-  → run(kind=build) → enqueue "agent.build"
-Worker: agent.build (tool loop)
-  1. write theme/tokens + 5 theme packs
-  2. write data/ seed + lib/store
-  3. write shared components/
-  4. for each screen: write app/<route>.tsx → validate → emit file_written events
-  5. final validation pass (typecheck-lite, import allowlist, render smoke test)
-  → run_events stream to UI: screen_started, file_written(path, rev), screen_done, run_done
+Worker: agent.chat (Planner, see 05 §3)
+  → streams prose (assistant.delta) → calls propose_plan(AppPlan)
+  → server validates + caps plan → plan_card message → projects.plan (draft) → plan.ready
+User: "only first 3 screens" → POST /api/projects/:id/messages → agent.chat → propose_plan again
+User: [Confirm & build]  (or "looks good" → confirm_plan)
+  → charge credits → run(kind=build) → enqueue "agent.step" {runId, step:"foundation"}
+Worker: agent.step chain (one job per step, each enqueues the next; 05 §4)
+  1. foundation   → JSON: 5 themes + collections → platform writes theme/themes.ts, data/schema.ts, data/seed.ts
+  2. components   → JSON: 5–10 shared components → components/<Name>.tsx (validated, 1 repair)
+  3. screen:<id>  → one .tsx per screen, streamed (file.writing) → validate → 1 repair → file.written
+  4. platform     → app/_layout.tsx + app/(tabs)/_layout.tsx from the plan; backend setup if connected
+  5. finish       → render smoke test → snapshot → build_summary → run.done
 Canvas iframes receive file revisions → hot-swap modules → re-render
 ```
 
 ### 4.2 Edit flows
 
-- **Chat edit / add screen**: same as build, run kind `edit`. An intent step decides whether this is add_screen, modify_screen, restyle, fix_error or question. See `05-ai-agent-design.md` §6.
+- **Chat edit / add screen**: the Planner calls `update_app(AppChange)`. The change pipeline regenerates only the affected data, components and screens; edited screens keep their old code until the new code passes validation. See `05` §3.5, §4.2.
 - **Inline visual edit**: browser → `POST /api/projects/:id/edits` with a structured operation (`{afid, op: "setStyle", prop, value}`). The server applies it as a deterministic AST transform (no LLM) and writes a new file revision. Canvas hot-reloads.
 - **Theme switch**: `POST /api/projects/:id/theme` → rewrite `theme/active.ts` → new revision. Instant.
 

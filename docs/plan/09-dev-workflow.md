@@ -99,6 +99,18 @@ Phase NN — <title> (docs/plan/phases/phase-NN-*.md)
 - **Record agent costs.** After Phase 06, check `ai_usage` totals after each manual test. Surprises there are bugs.
 - **Don't let it "simplify" security.** If a session proposes skipping `requireProjectAccess`, sandbox flags or encryption to get something working, stop and re-read `08-security.md`.
 
+## 5b. Prompt-writing habits that worked in the reference project
+
+From the course's own prompt book (`13-reference-implementation.md` R22). Each phase prompt in this plan already follows them; keep doing so for follow-ups:
+- **Limit the scope.** "For now, focus only on X. Use dummy data." Build and review the layout before logic depends on it.
+- **Mention what comes later.** "We'll add inline editing and a real backend later, so structure for that." This forces the right decisions early (theme tokens, data hooks, one element per line).
+- **Describe what the person sees** (buttons, dialogs, loading and error states) and leave code structure to the agent, unless the plan doc already fixes it.
+- **Link the docs** for third-party services instead of relying on memory.
+- **Ask first:** "Just tell me, don't implement anything." Several features (EAS builds, inline-edit UI, plan-first flow) were designed this way in a few cheap turns.
+- **Have the agent write the next prompt:** after talking a design through, "give me a short prompt to implement this", then run it in a fresh session.
+- **Report what you see:** paste the raw error or log, or a screenshot. That's often all a fix needs.
+- **Never paste credentials into prompts** that end up in files or commits. Use `.env` and placeholders.
+
 ## 6. Manual QA script (run before merging Phases ≥ 08)
 
 1. Sign up as a new user → 100 free credits shown (Phase 18 onward: from the ledger).

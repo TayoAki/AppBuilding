@@ -63,7 +63,7 @@ Plus an **edit set** (`evals/edits.jsonl`), each a starting fixture + instructio
 ## 3. Mocking the model for CI
 
 - `lib/ai/client.ts` accepts an injected transport. In tests, use **recorded fixtures**: real responses captured once with `RECORD=1`, keyed by a hash of (mode, stage, screen id). Replay is deterministic and free.
-- Fixtures must contain realistic tool calls (`write_file`, `validate`, …), so the e2e test exercises the real tool executor, VFS, validators, events and preview.
+- Fixtures must contain realistic Planner tool calls (`propose_plan`, `update_app`, …) and generator outputs (foundation JSON, component library JSON, screen files, including one that needs a repair), so the e2e test exercises the real tool executor, pipeline steps, VFS, validators, events and preview.
 - Re-record fixtures when prompts change materially. The diff in fixture files is itself a useful review artifact.
 
 ## 4. What "done" means for the agent work (Phases 06, 08, 09)

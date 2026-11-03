@@ -14,7 +14,7 @@ An AI app builder runs **untrusted, AI-generated code** for **untrusted users**,
 | Build/export workers | Code execution through generated code during `expo export` / EAS / npm install | Fixed `package.json`, no lifecycle scripts, ephemeral containers (§5) |
 | Our Anthropic bill / credits | Abuse via free accounts, prompt loops | Credit reservation before enqueue, rate limits, turn caps (§7) |
 | The agent | Prompt injection via prompts, uploaded images, pasted errors | Narrow tools, path allowlist, no shell, no secrets in context (§6) |
-| Generated apps' end users | Service keys shipped in app bundle; missing row security | Public config only; RLS / owner checks in migrations (§8) |
+| Generated apps' end users | Service keys shipped in app bundle; missing row security | Public config only; owner checks in platform-derived tables / gateway (§8) |
 | Payment state | Forged webhooks, double-crediting | Signature verification + idempotency keys (§9) |
 
 ## 2. Authorization
@@ -68,8 +68,8 @@ Generated code executes on our infrastructure during **thumbnail rendering**, **
 
 - The agent has **no shell, no network tool and no secrets in its context**. Its tools only read and write files inside the project's allowlisted paths (`05` §3).
 - Reference images and pasted error text are untrusted. The system prompt tells the model to treat them as data. Tools can't do anything worse than write project files, which the user can see and undo anyway.
-- `backend_migration` only writes SQL **files**. Provisioning applies them with the user's backend credentials in a separate job. Validate migrations against a denylist (no `DROP SCHEMA`, no `GRANT` to `anon` beyond the RLS pattern, no extensions) and show the SQL to the user before the first apply.
-- Validate `image_url` prompts: length cap, URL-encode, strip control characters.
+- The agent never writes SQL and never gets provider/MCP tools. App tables are **derived by platform code** from `plan.collections` (`03` §10), and `setup_backend` is a narrow, typed tool executed by server code. The reference app chose this because raw MCP tools would let the model read secrets and reach the person's other projects.
+- ImageKit generation URLs written by generators: the server extracts them, caps the count, URL-encodes descriptions, strips control characters and length-limits them before fetching (Phase 12).
 
 ## 7. Abuse and cost controls
 
@@ -82,7 +82,7 @@ Generated code executes on our infrastructure during **thumbnail rendering**, **
 ## 8. Generated apps' security (what we ship to *their* users)
 
 - Only **public** backend config (URL + anon/public key) goes into `lib/data/config.ts`. Service keys stay in `project_backends.secret_config_enc` and are only used server-side during provisioning.
-- Every agent-written table has `owner_id` (or `user_id`) and row-level security policies (or the provider's equivalent) so users can only read and write their own rows. The validator checks that each migration creating a table also enables RLS and creates owner policies.
+- Every derived `app_<name>` table has `owner_id`. The owner is the signed-in person, or a random per-install id until the app has auth. Access is enforced either by provider row-level security (direct client) or by the **platform data gateway** (`/api/apps/[id]/…`) when the provider has no RLS/functions. Unknown fields or wrong types → 400, so nothing is silently dropped.
 - Shared/public collections (e.g. a product catalog) must be marked explicitly (`shared: true` in the plan entity). The policy then allows public read, owner-only write. The video's CodeRabbit finding about `shared = true` came from exactly this ambiguity.
 - Secret scanning before zip/GitHub export (regex for common key formats + entropy check) blocks anything that looks like a secret.
 

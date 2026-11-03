@@ -46,7 +46,7 @@
 | Runtime | Expo (pinned SDK supported by Snack + current Expo Go) |
 | Navigation | expo-router (file-based) |
 | Language | TypeScript |
-| Styling | `StyleSheet` + theme tokens via `useTheme()` |
+| Styling | `StyleSheet.create` + `colors` tokens from `@/theme` (CSS variables in preview) |
 | Icons | `@expo/vector-icons` |
 | Local data | AsyncStorage via `lib/data` LocalAdapter |
 | Remote data/auth | `RemoteAdapter` for the connected `BackendProvider` |
@@ -67,13 +67,14 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | web, worker | 03 | ✅ | Any S3-compatible store |
 | `ANTHROPIC_API_KEY` | worker | 06 | ✅ | Worker only. The web tier never calls the model directly. |
 | `AI_MODEL` | worker | 06 | — | default `claude-opus-5-5` |
-| `AI_MODEL_PLAN` / `AI_MODEL_BUILD` / `AI_MODEL_EDIT` | worker | 08 | — | optional per-stage overrides; unset = `AI_MODEL`. Only change with eval evidence (`11` §5, D9) |
+| `AI_BUILDER_MODEL` | worker | 08 | — | model for all generators (Foundation, Data, Components, Screens); default `claude-opus-5-5`; `AI_MODEL` is the Planner. Change only with eval evidence (D9) |
 | `MAX_SCREENS_DEFAULT` | worker | 06 | — | default `3` |
-| `AGENT_MAX_TURNS` / `AGENT_MAX_FIX_ITERATIONS` / `AGENT_SCREEN_CONCURRENCY` | worker | 08 | — | 40 / 3 / 2 |
+| `AGENT_SCREEN_CONCURRENCY` | worker | 08 | — | screens built in parallel (default 1 = sequential, so the first screen can serve as style reference; 2 max) |
 | `ENCRYPTION_KEY` / `ENCRYPTION_KEY_VERSION` | web, worker | 02 | ✅ | 32 random bytes base64; versioned for rotation |
 | `PREVIEW_ORIGIN` | web | 07 | — | optional separate origin for preview runtime |
 | `IMAGEKIT_URL_ENDPOINT` | worker, generated apps | 12 | — | public |
 | `IMAGEKIT_PRIVATE_KEY` | worker | 12 | ✅ | never sent to clients or generated apps |
+| `IMAGEKIT_ENABLED` | worker | 12 | — | `true` → generators write ImageKit generation URLs; otherwise placeholders |
 | `BACKEND_PROVIDER` | web, worker | 13 | — | e.g. `supabase` \| `cloudhike` |
 | `BACKEND_OAUTH_CLIENT_ID` / `BACKEND_OAUTH_CLIENT_SECRET` | web | 13 | ✅ | The platform's developer app at the backend provider |
 | `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` / `GITHUB_APP_PRIVATE_KEY` | web, worker | 14 | ✅ | Export GitHub App |

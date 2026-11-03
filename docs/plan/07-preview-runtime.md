@@ -69,6 +69,7 @@ Parent → runtime:
 | `navigate` | `{ route }` |
 | `inspect.mode` | `{ enabled: boolean }` |
 | `inspect.highlight` | `{ afid }` (sync selection from code view) |
+| `edit.override` | `{ afid, style?, text?, imageUri? }`: apply on top of the running code (§5) |
 | `reset.data` | — clears the frame's in-memory AsyncStorage (and the parent's persisted copy) |
 | `storage.restore` | `{ snapshot }` — parent restores persisted AsyncStorage contents on boot |
 
@@ -87,12 +88,14 @@ Runtime → parent:
 
 Source files stay clean. Instrumentation is added **only at preview transpile time** by a Babel plugin:
 
-1. For every JSX element whose name resolves to a host-ish RN component (`View`, `Text`, `Pressable`, `TouchableOpacity`, `Image`, `ScrollView`, `TextInput`, and the `components/ui/*` components that forward `dataSet`), add `dataSet={{ afid: "<path>:<line>:<col>" }}`. If `dataSet` already exists, merge into it.
+1. For every JSX element whose name resolves to a host-ish RN component (`View`, `Text`, `Pressable`, `TouchableOpacity`, `Image`, `ScrollView`, `TextInput`, and every app component from `components/<Name>.tsx`), add `dataSet={{ afid: "<path>:<line>:<col>" }}`. If `dataSet` already exists, merge into it. (The reference app stamped `<file>:<line>:<type>` because its compiler gave no column. Two elements of the same type on one line were then AI-edit-only. Babel gives columns, so we stamp `line:col`. The "one element per line" rule (`06` §9) still applies, because it keeps splicing simple.)
 2. react-native-web renders `dataSet` as `data-afid="…"` on the DOM node.
 3. In inspect mode the runtime listens to `pointermove`/`click` (capture phase, `preventDefault` on click), finds the nearest `[data-afid]`, and posts `element.hover` / `element.select` with `getBoundingClientRect()` and the computed style.
 4. `isDynamic`: the plugin also records whether the element's text child is a JSX literal (`<Text>Daily reminder</Text>`) or an expression (`<Text>{habit.name}</Text>`). The inspector disables text editing for dynamic values, like the video does.
 
 Mapping `afid` → AST node on the server: re-parse the current revision and find the JSX element whose `loc.start` matches `line:col`. If the file has changed since (sha mismatch), the client refreshes the selection first.
+
+**Live override, then persist** (pattern proven in the reference app): a manual edit is first sent to every frame as `edit.override {afid, style?, text?}`. The runtime applies it on top of the running code and re-renders only that element, so the app never restarts. Shortly after (debounced), the server splices the edit into the source and saves a revision. Frames **keep running the code they compiled**, so their `afid` stamps stay valid, until the agent changes that file or the page reloads. Each save re-applies all pending edits to that same base revision.
 
 ## 6. Isolation and security
 
@@ -106,7 +109,7 @@ Mapping `afid` → AST node on the server: re-parse the current revision and fin
 - **Canvas frames** (`mode: "frame"`) render one route each, at a scale transform (e.g. 0.6). Frames outside the viewport are **paused**: replaced by their last screenshot (`html-to-image` snapshot posted by the runtime), and only mounted when visible.
 - **Interactive preview** (`mode: "interactive"`) is a single iframe at 1:1 phone size.
 - During a build, `file.update` messages are coalesced per 150 ms.
-- Theme switch is just `theme.set` → context change → re-render. No re-transpile.
+- Theme switch is just `theme.set` → set CSS variables on the frame root. `colors.*` tokens resolve to `var(--c-*)` in the preview (`06` §5), so nothing re-renders or re-transpiles.
 
 ## 8. Render smoke test (server side, Phase 08)
 

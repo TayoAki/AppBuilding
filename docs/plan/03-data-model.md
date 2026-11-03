@@ -19,7 +19,8 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | column | type | notes |
 |---|---|---|
 | `plan` | `text` default `'free'` | `free` \| `pro` (denormalized from subscription for fast gating) |
-| `credits_balance` | `bigint` default `0` | micro-credits; **cache** of `credit_ledger` sum, updated in the same transaction |
+| `credits_balance` | `bigint` default `0` | never-expiring credits (signup grant, refunds, top-ups); cache of its ledger sum |
+| `monthly_credits_balance` | `bigint` default `0` | Pro monthly allowance; **spent first**; replaced on renewal, zeroed when Pro ends (Phase 18) |
 | `onboarded_at` | `timestamptz` null | |
 
 > The video stores `credits = 100` directly on the user row. We keep a balance column for speed, but the **ledger is the source of truth** (Phase 18).
@@ -38,7 +39,9 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `visibility` | text default `'private'` | `private` · `unlisted` · `public` (public = shown on home showcase) |
 | `active_theme_id` | text null | id inside the project's theme pack |
 | `theme_pack` | jsonb null | parsed palette list for the theme picker (§6) |
-| `current_plan_message_id` | text null fk → messages | the confirmed `plan_card` message (Phase 06) |
+| `current_plan_message_id` | text null fk → messages | the latest `plan_card` message (Phase 06) |
+| `plan` | jsonb null | **the current plan is the truth** (`05` §3.2): `AppPlan` + `themePackage` + `collections` + `components` (name, purpose) + `pendingChanges` + `backend` (public config only). Platform files are rendered from it (`06` §10). |
+| `slug` | text null | set once at first build/publish with a project-id suffix (Phase 15) |
 | `snack` | jsonb null | `{snackId, url, savedAt, snapshotId}` of the last persistent Snack save (Phase 11) |
 | `bundle_id`, `android_package` | text null | iOS bundle identifier / Android package. Derived from slug, **locked after the first store build** (Phase 15) |
 | `eas_project_id` | text null | EAS project id on the user's Expo account (Phase 15) |
@@ -99,7 +102,9 @@ One row per agent/worker task the user can see progress for.
 | `transcript` | jsonb | Anthropic message array for agent runs (append-only) |
 | `credits_reserved` / `credits_charged` | bigint | micro-credits |
 | `started_at`, `finished_at` | timestamptz | |
-| `job_id` | text | pg-boss job id |
+| `job_id` | text | pg-boss job id of the current step |
+| `step` | text null | current pipeline step (`foundation`, `components`, `screen:<id>`, …). A redelivered job for an earlier step is ignored. |
+| `lease_id` | text null | the execution that owns the step; a retry takes over the lease, and the older execution stops at its next write |
 
 ### `run_events`
 Append-only stream that powers SSE.
@@ -192,7 +197,7 @@ One row per Anthropic API response. Written from Phase 06 on, even before billin
 
 ### `credit_ledger`
 Append-only. `credits_balance = sum(amount)`.
-| `id` | `user_id` | `amount` bigint (±micro-credits) | `reason` (`signup_grant`, `monthly_grant`, `reserve`, `release`, `charge`, `purchase`, `refund`, `admin_adjust`) | `run_id` null | `stripe_event_id` null (unique — idempotency) |
+| `id` | `user_id` | `amount` bigint (±micro-credits) | `balance` (`credits` \| `monthly`) | `reason` (`signup_grant`, `monthly_grant`, `monthly_reset`, `charge`, `refund`, `purchase`, `admin_adjust`) | `run_id` null | `reference` text **unique** (idempotency: e.g. `refund:<runId>:<screenId>`, `invoice:<stripeInvoiceId>`) |
 
 ### `subscriptions`
 | `user_id` pk | `provider` (`stripe`) | `customer_id` | `subscription_id` | `plan` | `status` | `current_period_end` |
@@ -210,8 +215,8 @@ Append-only. `credits_balance = sum(amount)`.
 - `runs (project_id, created_at desc)`
 - `file_revisions (project_id, path, created_at desc)`
 - `messages (project_id, created_at)`
-- `credit_ledger (user_id, created_at)`; unique `(stripe_event_id)` where not null
+- `credit_ledger (user_id, created_at)`; unique `(reference)`
 
 ## 10. Generated-app databases are separate
 
-The tables above belong to **the platform**. Each **generated app's** data (habits, expenses …) lives in the backend the user connects in Phase 13. That backend gets its own per-entity tables, created by agent-written migrations (see `phases/phase-13-generated-app-backend.md`). Never store generated-app user data in the platform DB, and never as a single JSON blob table. The video had to fix exactly that.
+The tables above belong to **the platform**. Each **generated app's** data (habits, expenses …) lives in the backend the user connects in Phase 13, in tables **derived deterministically from `projects.plan.collections`** by platform code. Each is an `app_<name>` table with `id`, `owner_id`, timestamps and one typed column per field (`string`→`text`, `number`→`double precision`, `boolean`→`boolean`, `string[]`→`text[]`, `references`→ FK `on delete set null`), plus one `app_values` table for `useStoredValue`. Migrations are **additive only** and run in one locked transaction. The agent never writes SQL. Never store generated-app user data in the platform DB, and never as a single JSON blob table (the reference app had to migrate away from exactly that).

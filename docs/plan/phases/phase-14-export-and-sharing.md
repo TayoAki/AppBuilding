@@ -9,7 +9,7 @@
 | New env vars | `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` |
 
 ## Goal
-Users own their code. From the workspace **Export** menu they can (1) download the full Expo project as a zip that runs with `npm install && npx expo start`, (2) push it to a GitHub repo: the first push creates the repo and commits to `main`, later pushes open a pull request, and (3) share the project with other people by email or link with viewer/editor roles.
+Users own their code. From the workspace **Export** menu they can (1) download the full Expo project as a zip that runs with `npm install && npx expo start`, (2) push it to a GitHub repo: a push commits to the default branch **only if the repo is empty**, and every other push goes to a new `appbuilding/update-…` branch with a pull request, so nothing already on GitHub is ever overwritten, and (3) share the project with other people by email or link with viewer/editor roles.
 
 ## What we do differently from the video (and why)
 - **GitHub App instead of an OAuth App.** The video registers an OAuth App, which for private repos needs the `repo` scope: full read/write to **every** repo the user can access, with no per-repo choice. A GitHub App lets the user pick which repos (or "only repos created by AppBuilding") to grant. It issues short-lived user-to-server tokens with fine-grained permissions (`contents:write`, `pull_requests:write`, `administration:write` only if we create repos), and can be revoked per repo. It's slightly more setup, but much safer for users and for us.
@@ -18,11 +18,17 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 - **Secret scan before every export.** Materialized output is scanned for secret-looking strings (service keys, private keys, tokens) before zipping or pushing. The push is blocked with a clear message.
 - **Zips are built in the worker and stored**, with a short-lived signed URL. They're not streamed from a request handler, so big projects don't hit timeouts.
 
+**Reference app notes** (`13-reference-implementation.md`)
+- **R17:** the first push goes to the default branch only if the repository is empty. Every other push, including a first push into an existing non-empty repo, goes to a new branch. We adopt this rule as-is.
+- **One exporter for zip and GitHub (and later EAS):** the reference app's `export-project.ts` feeds both. Ours is `materialize({ target: "export" })` (`06` §10), with dependency versions from the pinned `expo`'s `bundledNativeModules.json`, a static `app.json` with `web.output: "single"`, `eas.json`, and identity fields when set.
+- **Sharing scope:** the reference app ships **view-only** sharing for **existing accounts** only (every mutating route stays owner-only). Our plan has viewer/editor roles plus email invites. v1 may ship the reference app's simpler version (steps 7a only, and about 1 day less). The `project_members.role` column keeps the upgrade path open.
+- The reference app used a GitHub **OAuth App**. We keep the GitHub App (§3 of `13`: where we differ).
+
 ## Steps
 
 ### 1. README + materialize check
-- Extend `materialize()` (see `06-generated-app-template.md` §10) to render `README.md`: app name, description from the plan, "How to run" (Node version, `npm install`, `npx expo start`, Expo Go QR), "How to build" (EAS), backend notes (which provider, where config lives, **no secrets included**), "Generated with AppBuilding".
-- Add `.gitignore` (node_modules, .expo, dist, *.jks, credentials.json) to template platform-owned files.
+- Use `materialize({ target: "export" })` (see `06-generated-app-template.md` §10). It renders platform files from `projects.plan` (themes, schema, seed, layouts, `lib/backend/config.ts`), overlays `project_files`, and writes `package.json` with versions from `expo/bundledNativeModules.json` for the pinned SDK, a static `app.json` (`web.output: "single"`, identity from `projects.slug` / `android_package` / `bundle_id` if already set), and `eas.json`. It also renders `README.md`: app name, description from the plan, "How to run" (Node version, `npm install`, `npx expo start`, Expo Go QR), "How to build" (EAS), backend notes (which provider, where config lives, **no secrets included**), "Generated with AppBuilding".
+- Add `.gitignore` (node_modules, .expo, dist, web-build, *.jks, credentials.json) to template platform-owned files. Also make sure the **platform repo's own** `.gitignore` excludes local export/build scratch output (`tmp/`, `.exports/`, `*.tgz`). The reference app accidentally committed 10K+ generated build files.
 - Unit test: a materialized fixture project passes `npm install && npx tsc --noEmit` in CI (nightly job; too slow per PR).
 
 ### 2. Secret scanner
@@ -47,14 +53,17 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 ### 6. Push job `export.github`
 Worker `export-github.ts`:
 1. Materialize the current snapshot (create one if needed); secret scan.
-2. If `project_github_repos.last_commit_sha` is null → **first push**: create blobs for each file, a tree, a commit on top of the default branch head (or root commit for an empty repo), update `refs/heads/<default>`.
-3. Otherwise → **update push**: diff against `last_pushed_snapshot_id` (skip unchanged blobs), create branch `appbuilding/update-<yyyyMMdd-HHmmss>` from the default head, commit, then open a PR titled "AppBuilding update: <summary of runs since last push>", with a body listing changed screens/files.
+2. Check whether the repo is **empty** (no commits / no default-branch ref). If it is: create blobs for each file, a tree, a **root commit**, and `refs/heads/<default>`. This is the only case that writes to the default branch.
+3. Otherwise (a later push, *or* a first push into an existing repo that already has commits): diff against `last_pushed_snapshot_id` if set (skip unchanged blobs), create branch `appbuilding/update-<yyyyMMdd-HHmmss>` from the default head, commit with a meaningful message ("Add Settings screen; restyle HabitCard", built from the run summaries since the last push), then open a PR with a body listing changed screens/components/files.
 4. Save `last_pushed_snapshot_id`, `last_commit_sha` (for update pushes, the branch commit; merge state is the user's business).
 5. `runs.output = { commitUrl, prUrl? }`.
 - UI: "Commit & push" → progress → success state with "Open repo" / "Open pull request" buttons.
 - Handle a non-fast-forward or deleted repo: re-fetch the head and retry once; if the repo is gone, clear `project_github_repos` and ask the user to pick again.
 
 ### 7. Sharing
+**7a (v1 minimum, reference-app parity):** view-only sharing with existing accounts. The owner enters an email, it resolves to an existing user (otherwise "No AppBuilding account with this email"), and a `project_members` row with `role = viewer` is created. All mutating routes stay owner-only.
+
+**7b (full plan):**
 - Share dialog (from the Export menu, matching the video's placement): email input + role select (viewer/editor) → `POST /api/projects/:id/members`.
 - If the email belongs to an existing user → immediate access; otherwise create a pending `project_members` row and send an invite email with a signed accept link (`/invite/:token`). Accepting while signed in as that email binds `user_id` and sets `accepted_at`.
 - "Copy project link" → `/workspace/:id`. Access still requires membership, unless the project is public/unlisted (Phase 17 adds a read-only public page).
@@ -98,7 +107,7 @@ Worker `export-github.ts`:
 - [ ] Downloaded zip unpacks to a project that runs with `npm install && npx expo start` and opens in Expo Go.
 - [ ] Zip contains README with run instructions; contains no `*.jks`, no secrets (scanner test with a planted fake key blocks export).
 - [ ] Connect GitHub → create repo with an invalid name shows inline validation; valid name creates the repo.
-- [ ] First push lands on `main` with all files; a second push after a theme change creates `appbuilding/update-*` and a PR with only changed files.
+- [ ] Pushing to a new empty repo lands on the default branch with all files. A second push after a theme change creates `appbuilding/update-*` and a PR with only changed files. A first push into an existing non-empty repo also goes to a new branch (the default branch is untouched).
 - [ ] GitHub tokens are stored encrypted; disconnecting GitHub deletes them.
 - [ ] Share by email: existing user gets access immediately; a new email gets an invite that works only for that email; expired tokens are rejected.
 - [ ] Viewer can open the workspace read-only (chat input, inline edit, export-to-GitHub disabled); non-member gets 404/403 on every project route.
@@ -119,10 +128,13 @@ Implement:
 2. export_zip worker job → storage → signed download URL route.
 3. GitHub App integration (NOT an OAuth App): app JWT + user-to-server token, connect/callback,
    repo list + create with name validation (^[A-Za-z0-9._-]{1,100}$, slugified suggestion).
-4. export_github worker job via the Git Data API: first push to default branch; later pushes to
-   branch appbuilding/update-<timestamp> + open a PR; only changed blobs; store last_commit_sha.
-5. Sharing: project_members with viewer/editor, invite email with hashed token, accept flow,
-   requireProjectAccess role checks applied to every /api/projects/* route; viewer = read-only UI.
+4. export_github worker job via the Git Data API: commit to the default branch ONLY if the repo is
+   empty (root commit); every other push (incl. first push into a non-empty repo) goes to branch
+   appbuilding/update-<timestamp> + a PR with a meaningful message; only changed blobs; store last_commit_sha.
+   Use materialize({target:"export"}) (versions from bundledNativeModules.json, static app.json).
+5. Sharing: start with 7a (view-only, existing accounts, mutations owner-only); then 7b if in scope:
+   viewer/editor roles, invite email with hashed token, accept flow. requireProjectAccess role checks
+   on every /api/projects/* route; viewer = read-only UI.
 
 Verify current GitHub App docs (user-to-server tokens, token expiry/refresh, repo creation permission)
 before coding; note anything that differs from the phase doc.

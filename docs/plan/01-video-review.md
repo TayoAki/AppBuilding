@@ -5,6 +5,8 @@
 
 ---
 
+> **Update:** the course's prompt book and architecture roadmap were later shared with us. What they revealed, and the 22 patterns we adopted from them, are in `13-reference-implementation.md`. Several gaps listed below (hidden prompts, agent design) are now covered there.
+
 ## 1. Verdict
 
 The video is a good **feature list and build order**. It's a weak **engineering spec**.
