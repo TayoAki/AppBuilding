@@ -1,171 +1,202 @@
-# Phase 08 — App Generation (Builder Agent) & Theme Packs
+# Phase 08 — App Generation (Generator Pipeline) & Theme Packs
 
 | | |
 |---|---|
-| Video chapter(s) | Ch.11 "Generate Mobile App with AI" (1:11:10), first half up to ~1:27:00 |
+| Video chapter(s) | Ch.11 "Generate Mobile App with AI" (1:11:10), first half up to ~1:27:00; reference repo Ch.6 (+ Ch.8 components, Ch.11 shared tab layout) |
 | Branch | `feat/08-app-generation-and-themes` |
-| Depends on | Phase 05 (jobs & realtime), Phase 06 (planner + confirmed plan), Phase 07 (template, VFS, preview runtime) |
-| Effort (solo dev + Claude Code) | ~6–8 days (plus ongoing prompt tuning with evals) |
-| New env vars | `AGENT_MAX_TURNS` (40), `AGENT_MAX_FIX_ITERATIONS` (3), `AGENT_SCREEN_CONCURRENCY` (2). `MAX_SCREENS_DEFAULT` (3) and `AI_MODEL` already exist from Phase 06. |
+| Depends on | Phase 05 (jobs, step chaining), Phase 06 (Planner, confirmed plan), Phase 07 (template, renderers, VFS, preview runtime) |
+| Effort (solo dev + Claude Code) | ~5–7 days (plus ongoing prompt tuning with evals) |
+| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; screens build sequentially so screen 1 can be the style reference). `AI_BUILDER_MODEL` exists from Phase 06. |
 
 ## Goal
-When the user clicks **Confirm & build**, the Builder agent turns the confirmed `AppPlan` into a working Expo app inside the template. That means 5 theme packs, data types and seed data, a shared store, shared components, and one functional screen per planned screen. Progress streams live onto the canvas: each frame goes from placeholder → building shimmer → real screen, with "Writing `today.tsx` · 142 lines" in chat. The build ends validated (typecheck-lite, import allowlist, routes, render smoke test) and snapshotted. A theme picker switches between the 5 packs instantly, with no LLM call.
+When the plan is confirmed (button or `confirm_plan`), a chain of `agent.step` jobs turns it into a working Expo app (`05-ai-agent-design.md` §4.1):
+1. **Foundation** returns JSON. The platform turns it into 5 themes (with derived tokens and fixed contrast) plus the app's collections and sample records.
+2. **Component Designer** returns 5–10 shared components.
+3. **Screen Builder** writes one streamed `.tsx` per screen.
+
+Each output is validated, with **one repair round** if needed. The platform renders the layouts and routes, takes a snapshot, and the app is ready. Progress streams live: each canvas frame goes placeholder → shimmer → real screen, and the Code tab shows the current file being written. A **theme picker** (and the Planner's `set_theme` tool) switches between themes instantly, with no screen rebuilt.
 
 ## What we do differently from the video (and why)
-- **The background job is already in place.** The video builds generation in a request handler, then moves it into CloudHike Jobs + an ngrok webhook (~1:20:46) after hitting serverless timeouts. Our `agent.build` handler runs in the worker from the start (Phase 05). No tunnel is needed in dev.
-- **Orchestrated stages instead of one long free-form loop** (`05-ai-agent-design.md` §2.2). That gives per-screen status, per-screen retry, 2–3 screens in parallel, and a cached shared prefix so screens 2..N are cheap.
-- **Generation runs inside the contract.** The agent can only write allowlisted paths and imports, and validation is a gate rather than a hope. The video hit SDK and Expo Router issues later in Ch.14.
-- **Scrolling is in the contract from the start.** The video had to ask for scrollable screens after generation (~1:16:00), because its "no scroll" rule hid content.
-- **Theme contrast is fixed deterministically** in code after the agent writes `themes.ts`, not by asking the model to "keep text readable".
-- **Usage is metered on every API response** (`ai_usage`). Credits are not enforced until Phase 18, but the data exists from day one.
+- **The background job is already in place.** The video moved generation into CloudHike Jobs + an ngrok webhook (~1:20:46) after hitting serverless timeouts. Our steps are pg-boss jobs pulled by the worker (Phase 05). No tunnel.
+- **Single-purpose generators instead of one free-form agent.** Each step is one structured output or one file, checked by code. That gives real progress, per-screen retry, and small cacheable prompts.
+- **Everything derived from data is rendered by the platform**: themes, schema, seed, tab layout and routes. The agent can't break them.
+- **Scrolling and pinned headers are in the screen rules from the start.** The video had to ask for scrollable screens afterwards (~1:16:00).
+- **Contrast is fixed deterministically** in `lib/theme/derive.ts`, not by asking the model to "keep text readable".
+- **Usage is metered** on every response. The credit charge and refund hooks exist (no-ops until Phase 18).
+
+**Reference app notes** (`13-reference-implementation.md`)
+- R1: Foundation → Component Designer → Screen Builder, each validated with one repair, is the shipped pipeline. A failed screen doesn't lose finished ones.
+- R5: screens use `useCollection` / `useStoredValue` / `useAuth` from `@/lib/backend`, and records come from collections with sample data, never hardcoded.
+- R6: the component library is generated **before** any screen. Screens see only each component's props type and purpose.
+- R7: the shared tab layout comes from `screen.tab`, so screens never draw a tab bar.
+- R8: `import { colors } from "@/theme"`, with no color literals. In the preview a theme switch only sets CSS variables.
+- R9: one element per line with its own named style. Phase 10's inline editing depends on it.
+- R4: the default Sign In screen is built like any other screen, using `useAuth`.
 
 ## Steps
 
-### 1. AI client plumbing for long runs
-- Extend `lib/ai/client.ts` (Phase 06) with `streamTurn()`: streaming `client.beta.messages.stream(...)` with the settings in `05` §1 (adaptive thinking, `display: "summarized"`, explicit `effort`, `fallbacks: "default"` with its beta header, `max_tokens: 64000`). It returns `finalMessage()` and records `ai_usage`.
-- `lib/ai/prompts/builder/`: `role.md`, a generated contract block (from `templates/expo-app/CONTRACT.md`), `uiux-guide.md`, the component docs (from `COMPONENT_DOCS.md`), and `exemplars/` (two hand-written high-quality screens, taken from the Phase 07 fixture). The system blocks are assembled in a **fixed order** with `cache_control` on the last stable block (`05` §5). Snapshot-test the assembled prompt so accidental byte changes show up in review.
+### 1. Generator helpers (`lib/ai/generate.ts`)
+- `generateJson(schema, {system, user, effort})`: streams with `output_config.format = zodOutputFormat(schema)` and validates the final text with Zod. If the installed SDK's `messages.parse` supports streaming, use it; check the docs. Records `ai_usage`.
+- `generateFile({system, user, effort, onDelta})`: streams plain text, calls `onDelta` for live code, strips an accidental leading/trailing code fence defensively, and returns the file text. Checks `stop_reason` (`refusal`, `max_tokens` → treated as a validation problem → repair).
+- Both use `AI_BUILDER_MODEL`, adaptive thinking (`display: "summarized"`), explicit effort (`05` §1), fallbacks, and `max_tokens: 64000`.
 
-### 2. Tools (`lib/ai/tools/`)
-- Implement `list_files`, `read_file`, `write_file`, `edit_file`, `delete_file`, `validate`, `set_screen_status` per `05` §3, each as a Zod schema plus `run(ctx, input)`.
-- Use `strict: true` on every tool, and `eager_input_streaming: true` on `write_file` and `edit_file`.
-- Every tool call is validated against its Zod schema before running (eager streaming disables server validation). Failures return a `tool_result` with `is_error: true`.
-- `ctx = { projectId, runId, allowedPaths, readShas }`. `allowedPaths` changes per stage (S1 vs S2 vs S3). `readShas` drives the `edit_file` staleness check.
-- All writes go through `lib/vfs.writeFile(..., author: "agent", runId)` and emit `file.written {path, revisionId}`.
+### 2. Prompt modules (`lib/ai/prompts/`)
+- `rules.ts`: the shared blocks from `05` §5 (THEME_RULES, DATA_RULES, SCREEN output/code/components/data/everything-works/layout/design/keep-editable, TAB rules, IMAGE_RULES, COMPONENT rules), **written in our own words**. One source, so the generators can't drift apart.
+- `foundation.ts`, `components.ts`, `screen.ts`, `repair.ts`: static system prompts (cached) + request builders.
+- `app-context.ts`: `appContext(plan)` renders app, design, collections (with one sample record each), component props APIs and routes. It's the shared prefix for every screen step, with a `cache_control` breakpoint after it (`05` §7). The screen spec, tab rules, style reference and (for edits) the current file come after the breakpoint.
+- Snapshot-test every assembled request, so accidental byte changes to cached prefixes show up in review.
 
-### 3. The manual streaming loop (`worker/agent/loop.ts`)
-- Follow the sketch in `05` §3: persist each assistant turn to `runs.transcript` before running tools; return all parallel `tool_result`s in one user message; handle `refusal`, `pause_turn` and `max_tokens`; check the cancel flag between turns; enforce the `AGENT_MAX_TURNS` cap.
-- `pipeStreamToRunEvents(stream, runId)`: thinking-summary deltas become `thinking.summary` (throttled). Partial `write_file` input JSON becomes `file.writing {path, lines}` (throttled ≤ 4/s). Parse `path` as soon as it appears in the partial JSON, and count `\n` in the partial content.
-
-### 4. Validation pipeline (`lib/validate/`)
-- Path allowlist, Babel syntax parse, import allowlist (from `templates/expo-app/ALLOWED_IMPORTS.json`), typecheck-lite (TypeScript compiler API, in-memory host with template `.d.ts` stubs, `noEmit`, first 20 errors), route check (plan screens ↔ files; literal `router.push` / `<Link href>` targets), theme discipline (no color literals outside `theme/`), data discipline (data only via `lib/store`).
-- Output: `{ errors: Issue[], warnings: Issue[] }`, rendered to compact text (≤ ~4 KB) for the agent. Emits `validation.result`.
-- Unit tests with a broken-on-purpose copy of the fixture (one test per rule).
-
-### 5. Builder orchestration (`worker/handlers/agent-build.ts`)
+### 3. Step dispatcher (`worker/handlers/agent-step.ts`)
+`agent.step {runId, step}` → `claimStep` → dispatch by step name → `advance(nextStep)`:
 ```
-load run + confirmed plan (messages.kind = plan_card, confirmed)
-truncate plan.screens to plan cap (MAX_SCREENS_DEFAULT for first build)
-upsert screens rows (status = planned) → emit run.status(running)
-S1 Foundation  (allowedPaths: theme/themes.ts, data/, lib/store/, components/shared/, app/_layout.tsx)
-   → after themes.ts written: post-process contrast (step 6) → emit theme.ready
-   → platform writes theme/active.ts + regenerates app/(tabs)/_layout.tsx from screens + plan.navigation
-S2 Screens     p-limit(AGENT_SCREEN_CONCURRENCY) over screens:
-   shared cached prefix + "Build screen <id>" → screen.started … file.written … screen.done
-   (allowedPaths: that screen's route file + components/<screenId>/)
-   skip screens already status=ready (resume after crash/retry)
-S3 Integrate   validate(all) + render smoke test → if errors: fix loop ≤ AGENT_MAX_FIX_ITERATIONS
-create project_snapshots row → messages(kind=build_summary) → run.done {summaryMessageId, snapshotId}
-projects.status = ready (or error with a retryable run.error)
+foundation → components → screen:<firstScreenId> → screen:<id2> … → finish
 ```
-- Each stage is a fresh conversation built from the same cached prefix. Each S2 screen loop is its own transcript (stored under `runs.transcript.screens[screenId]`). Transcripts are append-only (`05` §9).
-- Reference images: only screens whose `referenceAssetIds` include an asset receive that image block.
-- Cancel button: `POST /api/runs/:id/cancel` sets a flag. The loop stops at the next turn boundary and keeps finished screens.
+- `finish` renders platform files (already derived from `projects.plan`), runs the render smoke test (step 8), calls the backend-setup hook (Phase 13, no-op now), creates a `project_snapshots` row (`files`, `screens`, `label: "Initial build"`), writes a `build_summary` message (template text: "Built 4 screens: Sign In, Today, …"), sets status `ready`, and emits `run.done`.
+- Each step checks `isCanceled` and `assertLease` before writing, and skips screens already `ready` (resume after crash/retry, never charged twice).
 
-### 6. Theme packs
-- The S1 prompt requires `theme/themes.ts` to export 5 `Theme` objects. The first follows `plan.themeSeed`; the others are named variations (light and dark mixed).
-- `lib/themes/postprocess.ts`: parse `themes.ts` with Babel, apply `ensureContrast()` to `onPrimary`/`onSecondary`/`text`/`textMuted` against their backgrounds (WCAG AA 4.5:1; 3:1 for large text tokens), print the file back, and write a new revision with `author: "system"`. Cache the parsed swatches in `projects.theme_pack` and set `projects.active_theme_id`.
-- `POST /api/projects/:id/theme {themeId}` writes `theme/active.ts` (`author: "theme_switch"`), updates `projects.active_theme_id`, and emits `file.written`. The preview applies it via `theme.set`. No credits, no LLM.
-- Header UI: theme dots (swatches from `theme_pack`), with active state and tooltips showing the theme name.
+### 4. Foundation step
+- Schema `FoundationSchema = { themes: Theme[5], collections: Collection[] }` (base tokens per theme; `Collection` per `06` §6).
+- Request: app name, tagline, summary, target users, confirmed design, screens with purposes and key elements.
+- Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names, `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again").
+- Then the platform: `deriveThemePackage()` (full tokens + contrast + tinted neutrals) → `projects.plan.themePackage = {themes, activeThemeId: themes[0].id}`, `projects.plan.collections = …` → re-render `theme/themes.ts`, `data/schema.ts`, `data/seed.ts` → emit `theme.ready`, `plan.updated`.
+- Images: when `IMAGEKIT_ENABLED`, image fields in sample records use generation URLs (≤ 8 per step). The wait-and-store post-processing is Phase 12; until then keep placeholder URLs.
 
-### 7. Canvas & chat UX during a build
-- Frames listen for `screen.started` (shimmer + "Building Today…"), `file.written` (hot swap) and `screen.done` (live render).
-- Chat shows a collapsible build timeline: Foundation ✓ → Today (writing · 142 lines) → Progress ⏳ … plus validation results, the final `build_summary`, and the ms/credits used (credits displayed but not charged yet).
-- After a page reload, the run timeline rebuilds from `run_events` (SSE `Last-Event-ID` from Phase 05).
+### 5. Components step
+- Schema `{ components: [{name, purpose, code}] }`, 5–10 entries, PascalCase names, ordered simple-first.
+- Validate each `code` with `lib/validate` (step 7), plus component rules: exported `<Name>Props` type + default export; imports only allowlisted packages, `@/theme`, `@/data/schema` (types) and **earlier** components; no `@/lib/backend` or `expo-router` imports (props only, no navigation); no tab bar; 20–80 lines (warning). Must include a button, a screen header and an empty state.
+- One JSON repair round. Then write `components/<Name>.tsx` (`author: "agent"`), store `[{name, purpose}]` in `projects.plan.components`, emit `components.ready`.
+- `lib/ai/component-api.ts`: extract each component's props type + purpose with an AST parse, not a regex. This is what screens see.
 
-### 8. Render smoke test (`worker/lib/smoke.ts`)
-- Playwright + Chromium loads `/preview-runtime/harness.html`, pushes the same file set the canvas receives (project files plus the template's runtime files such as `theme/tokens.ts` and `lib/data/*`), visits each route, and collects `runtime.error` messages for 1.5 s per route.
-- Errors are fed to S3 like validator errors. The harness is reused for thumbnails in Phase 17.
+### 6. Screen steps
+- `screen:<id>` → request = APP CONTEXT (cached) + "Build this screen (k of N)": name, purpose, key elements, links-to names, tab rules for this screen (tab → `SafeAreaView edges={["top"]}`, no tab bar; non-tab → no tab bar), and the **style reference** = the code of the first finished screen (absent for screen 1).
+- Stream via `generateFile`. `onDelta` emits `file.writing {path, lines}` (throttled ≤ 4/s), and the Code tab shows the streamed text for the active file. Stream text never becomes a file revision until validated.
+- Validate (step 7). On problems, one repair ("This file has problems: … Rewrite the complete file with these fixed and everything else kept. Reply with only the file.") and re-validate.
+- Pass → `writeFile(screenFilePath(screen), …)` → `screens.status = ready` → `screen.done`. Fail after repair → `screens.status = error`, `screen.failed {error}`, `refundScreen()` hook (no-op until 18). The build continues with the next screen and finishes as `ready` with a summary noting the failed screen and "ask me to try again".
 
-### 9. Snapshot & summary
-- At the end of the run, `project_snapshots` stores `{path → revisionId}`. A "Restore" UI comes in Phase 09, but the data exists now.
-- Eval hook: `evals/` gets 5 golden prompts (habit tracker, expense tracker, grocery store, workout log, notes). Record pass/fail, validation counts, duration, cost and `cache_read_input_tokens` per S2 call. See `10-testing-and-evals.md`.
+### 7. Validators (`lib/validate/`)
+Per `05` §6:
+- Syntax (`@babel/parser`).
+- Import allowlist (`ALLOWED_IMPORTS.json` + `@/theme`, `@/lib/backend`, `@/data/schema`, existing `@/components/<Name>`).
+- Theme discipline: no hex, rgb or named colors and no computed alphas, except `"transparent"` and literals already in the previous version or named in the request.
+- Data discipline: no AsyncStorage/storage imports; `useCollection("<name>")` names exist; `add`/`update` object literals use only that collection's fields.
+- Routes: `router.push/replace` and `<Link href>` literals resolve via `lib/render/routes.ts`.
+- Editable markup: a warning when one line holds two JSX elements of the same type.
+- Typecheck-lite: TypeScript compiler API, in-memory host with `.d.ts` stubs for `@/lib/backend`, `@/theme`, the rendered `data/schema.ts` and the project's components; `noEmit`; first 20 errors.
+
+Output `{problems: Issue[], warnings: Issue[]}` → compact text (≤ ~4 KB) for repair prompts, plus a `validation.result` event. Unit tests: one broken-on-purpose fixture file per rule.
+
+### 8. Render smoke test (`worker/agent/smoke.ts`)
+At `finish`: Playwright + Chromium loads `/preview-runtime/harness.html` with the materialized `preview` target, renders each route, and collects `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
+
+### 9. Theme picker + `set_theme`
+- **Theme dropdown** centered at the top of the canvas (where the reference app put it): theme names with swatches, the active one checked.
+- `POST /api/projects/:id/theme {themeId}` (editor) → update `projects.plan.themePackage.activeThemeId` → `plan.updated` → all frames get `theme.set` (CSS variables, instant). The interactive preview keeps its state, and native targets get a re-rendered `theme/themes.ts`. No LLM, no credits.
+- Add the Planner tool `set_theme` (`{themeId}` or `{newTheme: {name, mode, colors}}`) and the static prompt line "use set_theme for whole-app colors and looks; say it's done". A `newTheme` goes through `deriveThemePackage` (contrast-fixed) and is appended and activated. Deploy-time tool list change only (Phase 06 note).
+- **Interim behaviour for built apps** (until Phase 09 adds `update_app`): the Planner may answer questions and use `set_theme`. For other change requests it says plainly that screen changes come in the next release. Phase 09 deletes that line, and the static prompt there also says to ignore earlier replies like it (R-note in `05` §3.2 rule 3).
+
+### 10. Chat and canvas progress UI
+- Chat: a build progress card "Building 2 of 4: Today", with per-screen ticks/errors and a Cancel button (`POST /api/runs/:id/cancel`).
+- Canvas: frames show `planned` → `building` (shimmer, with live line count) → the live screen on `screen.done`. A `screen.failed` frame shows an error badge with the message.
+- Code tab: auto-selects the file being written and shows the stream.
+
+### 11. Tests and evals
+- Recorded fixtures (`RECORD=1`) for: foundation (valid + one repair), components (valid + an import-cycle violation → repair), 3 screens (one with a color literal → repair), smoke-test failure → repair.
+- Integration: confirm → steps chain → files written → snapshot → `ready`. Kill the worker during `screen:2` → restart → resumes at `screen:2`, with no duplicate files and the charge hook called once.
+- Determinism: the rendered `themes.ts`/`schema.ts`/layouts are unchanged by screen steps.
+- `npm run eval -- --limit 5` (live, opt-in) reports the `10-testing-and-evals.md` §2.2 metrics, including the S2-equivalent cache hit (`cache_read_input_tokens > 0` on screens 2..N).
 
 ## Files to create / change
 ```
-lib/ai/client.ts                      (+ streamTurn, usage recording)
-lib/ai/prompts/builder/{role.md,uiux-guide.md,exemplars/*.tsx,index.ts}
-lib/ai/tools/{list-files,read-file,write-file,edit-file,delete-file,validate,set-screen-status,index}.ts
-lib/ai/build.ts                       (stage prompts + allowedPaths per stage)
-lib/validate/{paths,syntax,imports,typecheck,routes,theme,data,index}.ts
-lib/themes/{postprocess.ts,contrast.ts}
-worker/agent/loop.ts
-worker/agent/stream-events.ts
-worker/handlers/agent-build.ts
-worker/lib/smoke.ts
-public/preview-runtime/harness.html   (built by preview-runtime/build.mjs)
-app/api/projects/[projectId]/build/route.ts
+lib/ai/generate.ts
+lib/ai/component-api.ts
+lib/ai/prompts/{rules.ts,app-context.ts,foundation.ts,components.ts,screen.ts,repair.ts}
+lib/ai/schemas/{foundation.ts,components.ts}
+lib/ai/tools/planner-tools.ts              (+ set_theme)
+lib/ai/prompts/planner.ts                  (+ theme section, interim built-app line)
+lib/validate/{index.ts,syntax.ts,imports.ts,theme.ts,data.ts,routes.ts,markup.ts,typecheck.ts,stubs/*.d.ts}
+lib/theme/derive.ts                        (from Phase 07; + newTheme path)
+worker/handlers/agent-step.ts              (real dispatcher)
+worker/agent/{foundation.ts,components.ts,screen.ts,finish.ts,smoke.ts}
+preview-runtime/harness.html               (headless render harness)
 app/api/projects/[projectId]/theme/route.ts
-app/api/runs/[runId]/cancel/route.ts
-components/workspace/{ThemePicker.tsx,BuildTimeline.tsx}
-components/canvas/PhoneFrame.tsx      (+ building/error states)
-evals/golden/*.json, evals/run-build-eval.ts
+components/workspace/ThemePicker.tsx
+components/chat/renderers/build-progress.tsx
+components/canvas/PhoneFrame.tsx           (building / failed states)
+tests/fixtures/anthropic/build/*
+evals/{run.ts,prompts.jsonl}               (smoke subset)
 ```
 
 ## Database changes
-- Uses `runs` (kind `build`), `run_events`, `screens.status`, `project_files`, `file_revisions` (`author`: `agent` | `system` | `theme_switch`), `ai_usage`.
-- New table: `project_snapshots` (`03` §5).
-- New column usage: `projects.theme_pack` (jsonb), `projects.active_theme_id`, `projects.status` transitions `awaiting_confirmation → building → ready | error`.
+- `projects.plan`: adds `themePackage`, `collections`, `components` (`03` §2).
+- `screens.status`: `planned | building | ready | error`.
+- `project_snapshots` rows at the end of each build (`files`, `screens`, `label`).
+- `runs.step` / `runs.lease_id` used by the step chain. `messages.kind = build_summary`.
 
 ## API surface
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
-| POST | `/api/projects/:id/build` | editor | `{ planMessageId }` → `{ runId }`. Rejects if a build/edit run is already `queued`/`running` for the project (409). |
-| POST | `/api/projects/:id/theme` | editor | `{ themeId }` → `{ revisionId }`. 400 if `themeId` isn't in `theme_pack`. |
-| POST | `/api/runs/:runId/cancel` | editor of run's project | → `202` |
-| GET | `/api/runs/:runId/events` | viewer | SSE (from Phase 05) — new event types per `05` §7 |
+| POST | `/api/projects/:id/theme` | editor | `{themeId}` → `200 {activeThemeId}` (free, instant) |
+| POST | `/api/runs/:runId/cancel` | editor | (Phase 05) now stops the step chain at the next checkpoint |
+| (Planner tool) | `set_theme` | worker | `{themeId}` \| `{newTheme}` → `{activeThemeId}` |
 
 ## Acceptance checklist
-- [ ] Confirming a 3-screen habit-tracker plan produces a working app in a few minutes. All frames render, and navigation, add, toggle and delete work in the interactive preview.
-- [ ] The canvas shows shimmer → live screen per screen as each finishes. Chat shows "Writing `<file>` · N lines" updating live.
-- [ ] Reloading the page mid-build loses nothing; the timeline resumes.
-- [ ] Killing the worker mid-S2 and restarting: the job retries and skips screens already `ready`.
-- [ ] Validation errors injected by a test (e.g. a forbidden import) are fixed by S3, or the run ends in `error` with a readable message and a Retry button.
-- [ ] 5 theme dots appear. Switching updates every frame in < 300 ms with zero `ai_usage` rows added.
-- [ ] Every theme passes the contrast check (unit test over generated packs).
-- [ ] Every screen with lists scrolls. No content is unreachable (smoke test asserts that the scroll container exists for long content).
-- [ ] `ai_usage` has a row per API response. S2 calls after the first show `cache_read_input_tokens > 0`.
-- [ ] **Security:** a crafted plan or user message instructing the agent to write `package.json`, `../../etc/x` or `lib/data/config.ts` results in tool errors and no file changes (test with a mocked model response).
-- [ ] **AuthZ:** `build`, `theme` and `cancel` return 404 for non-members and 403 for viewers.
-- [ ] 5/5 golden eval prompts complete with 0 validation errors (record the baseline numbers in `10-testing-and-evals.md`).
+- [ ] Confirming the habit-tracker plan produces Sign In + 3 screens in roughly 2–5 minutes, with live frame states and live code in the Code tab.
+- [ ] The app works in the interactive preview: sign in (local), add, complete and delete a habit, see the change on another tab. Lists scroll, and headers and main buttons stay pinned.
+- [ ] Every screen imports shared components where they fit, draws no tab bar (tab apps) and contains no color literals (validator report is clean).
+- [ ] Five themes appear in the picker. Switching is instant across all frames, with no LLM call and no `ai_usage` row. Asking in chat "make it dark" switches or adds a theme via `set_theme`, and no screen is rebuilt.
+- [ ] Text is readable in all 5 themes (contrast unit test over the derived tokens).
+- [ ] A screen with an injected validator failure (fixture) is repaired once and passes. A screen that still fails is marked `error` while the other screens finish.
+- [ ] Killing the worker mid-build resumes from the current screen, with no duplicate files and no double charge-hook call.
+- [ ] Refreshing mid-build resumes progress, with nothing missing.
+- [ ] The materialized app (`export` target) runs with `npx expo start`.
+- [ ] **Security:** generators can't write outside `app/<id>.tsx`, `app/(tabs)/<id>.tsx` and `components/<Name>.tsx` (vfs tests), and generated code runs only in sandboxed iframes and the smoke harness.
+- [ ] **AuthZ:** the theme endpoint and cancel return 404 for non-members and 403 for viewers.
 
 ## Claude Code prompt
 ```text
-We are building AppBuilding. Implement Phase 08 (Builder agent + theme packs) only.
+We are building AppBuilding. Implement Phase 08 only: the generator pipeline + themes.
 
 Read first:
-- docs/plan/05-ai-agent-design.md (entire file — §1 model config, §2.2 stages, §3 tools
-  and loop, §4 validation, §5 caching, §7 events, §9 transcripts, §10 limits)
-- docs/plan/06-generated-app-template.md (contract, ownership, themes)
-- docs/plan/07-preview-runtime.md (§8 smoke test harness)
-- docs/plan/03-data-model.md (§4 runs/events, §5 VFS, §8 ai_usage)
+- docs/plan/05-ai-agent-design.md (entire file; §4 pipelines, §5 rule blocks, §6 validation
+  and repair, §7 caching, §8 events)
+- docs/plan/06-generated-app-template.md (entire file)
+- docs/plan/07-preview-runtime.md (§3, §8 smoke harness)
+- docs/plan/13-reference-implementation.md (R1, R4–R10)
 - docs/plan/phases/phase-08-app-generation-and-themes.md (this phase)
-- Existing code: lib/ai (Phase 06), lib/jobs + lib/runs (Phase 05), lib/vfs + preview-runtime (Phase 07)
+Check the installed @anthropic-ai/sdk for streaming + structured outputs
+(output_config.format / messages.parse) before writing code. Don't guess.
 
-Before writing SDK code, check the installed @anthropic-ai/sdk version's docs for
-streaming, eager_input_streaming, cache_control and the fallbacks beta. Don't guess signatures.
-Model id comes from env.AI_MODEL — never hard-code it.
+Build, one commit per numbered step:
+1. lib/ai/generate.ts (generateJson with structured outputs, generateFile streaming text).
+2. Prompt modules: rules.ts in our own words per 05 §5, app-context with a cache breakpoint,
+   foundation/components/screen/repair prompts; snapshot tests of assembled requests.
+3. agent.step dispatcher with claimStep/assertLease/advance: foundation → components →
+   screen:<id>… → finish.
+4. Foundation: schema, validation, one repair, deriveThemePackage, store in projects.plan,
+   re-render themes/schema/seed, theme.ready.
+5. Components: schema, per-component validation (ordered imports, props-only, no tab bar),
+   one repair, write components/<Name>.tsx, component-api extraction via AST.
+6. Screens: APP CONTEXT + spec + tab rules + style reference (first finished screen);
+   stream file.writing; validate → one repair → write or mark error (refund hook no-op).
+7. lib/validate per 05 §6 incl. typecheck-lite with .d.ts stubs; one failing fixture per rule.
+8. Render smoke test via Playwright harness with one repair on runtime errors.
+9. Theme picker (top-center of canvas), POST /theme, Planner set_theme tool (+ newTheme),
+   interim "screen changes come next" line for built apps.
+10. Build progress UI (chat card, frame states, live Code tab), cancel.
+11. Fixtures + integration tests (resume after worker kill), eval smoke subset.
 
-Build, one commit per phase-doc step: streamTurn + prompts (with a prompt snapshot test),
-tools with Zod validation + path allowlist, manual streaming loop, validators with tests,
-S1/S2/S3 orchestration in worker/handlers/agent-build.ts, theme post-processing +
-POST /theme + ThemePicker, canvas/chat build UX, smoke test harness, snapshot + build_summary,
-and a 5-prompt eval script.
-
-Rules: agent writes ONLY via lib/vfs; no bash tool; tool_choice auto only; transcripts
-append-only; every API route uses requireProjectAccess(); events never contain file contents.
-Do NOT build: chat edits/add-screen (Phase 09), inline editing (Phase 10), Snack/QR (11),
-credit enforcement (18).
-
-Definition of done = Acceptance checklist in the phase doc. Use a mocked Anthropic client in
-unit tests; run the real golden evals once and report pass rate, duration and cost.
-Finish with lint, typecheck, tests, and a summary including any prompt changes you made.
+Do NOT build: update_app / chat edits (Phase 09), inline editing (10), Snack (11), image
+post-processing (12), backend (13), credit enforcement (18).
+Definition of done = Acceptance checklist in the phase doc.
+Finish with lint/typecheck/tests and a short eval run (--limit 3) with cost per app.
 ```
 
 ## Pitfalls & notes
-- **Cache silently missing:** a timestamp, a project name in `system`, or tools assembled in a different order breaks the shared prefix. Keep all project-specific content in `messages`.
-- **Partial JSON parsing** for `file.writing`: use a tolerant parser on the accumulated `input_json` deltas. Only the *final*, schema-validated input is written.
-- **Parallel screens editing shared files:** S2 loops may only write their own route file and `components/<screenId>/`. If a screen needs a shared component change, it reports it, and S3 makes the change. That avoids write races.
-- **Tab layout drift:** the platform (not the agent) generates `app/(tabs)/_layout.tsx` deterministically from the `screens` list + `plan.navigation`, after S1 and on every add/remove screen (Phase 09). It's outside every agent allowlist (`06` §3).
-- Keep the first-build cap (`MAX_SCREENS_DEFAULT=3`) during development for speed and cost. The video does the same, and users can ask for more screens via chat in Phase 09.
-- If quality is poor, improve the **exemplars and component library** before adding more prompt rules. Long rule lists make output worse on current models.
-- Expect to revisit `uiux-guide.md` repeatedly. Every change must be followed by an eval run.
+- **Don't let stream text become a revision.** Only validated output is written; the stream is for display. This keeps frames from hot-swapping half-written code.
+- **Style reference ordering:** screen 1 has no reference, so its quality sets the tone for the app. Build the first *non-sign-in* screen first when Sign In is the first screen, so the reference is a content-rich screen.
+- **Structured outputs and long JSON:** the component library can be 10–15k output tokens. Use streaming with a large `max_tokens`, and treat `max_tokens` truncation as a repair case ("the JSON was cut off; return fewer, shorter components").
+- **Cache invalidators:** component code in the APP CONTEXT would bust the cache whenever one component changes. Only the props APIs go into the APP CONTEXT, and the code never does.
+- **CSS variables vs computed colors:** the theme rules forbid `colors.primary + "20"`. That would break CSS variables in the preview and theme switching on device. Keep the validator rule strict.
+- **Sign-in redirect loops:** screens that redirect on `user` must wait for `loading === false`. That rule is in the screen rules, and the smoke test catches infinite navigation (add a navigation-count guard in the harness).
+- **The reference app's bug to avoid:** after the first build its agent said "editing by chat isn't available", and later kept repeating it. Keep the interim line short, and remove it in Phase 09 (whose prompt also tells the Planner to ignore such earlier replies).
+- Keep `MAX_SCREENS_DEFAULT=3` during development for speed and cost. Users can add screens by chat in Phase 09.
