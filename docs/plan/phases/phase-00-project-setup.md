@@ -57,7 +57,7 @@ Create the empty-but-production-shaped Next.js repo that every later phase build
 - Optional: `husky` + `lint-staged` pre-commit (format + eslint on staged files).
 
 ### 8. Local infrastructure
-- `docker-compose.yml`: `postgres:16` (port 5432, volume) and `minio/minio` (ports 9000/9001) plus a `minio/mc` init container that creates the dev bucket.
+- `docker-compose.yml`: `postgres:16` (port 5432, volume), `minio/minio` (ports 9000/9001) plus a `minio/mc` init container that creates the dev bucket, and `axllent/mailpit` (SMTP 1025, UI 8025) for verification/invite emails from Phase 02.
 - `.env.example` defaults point at these (`S3_ENDPOINT=http://localhost:9000`, `S3_REGION=us-east-1`, force path-style in the S3 client later).
 
 ### 9. GitHub repo and CI
@@ -111,7 +111,7 @@ None (empty schema; the connection is verified).
 None. Optionally add `GET /api/health` → `{ ok: true, db: "up" | "down" }`, running `select 1`. It's useful for deploy checks in Phase 19.
 
 ## Acceptance checklist
-- [ ] `docker compose up -d` starts Postgres and MinIO; the dev bucket exists.
+- [ ] `docker compose up -d` starts Postgres, MinIO and Mailpit; the dev bucket exists.
 - [ ] `npm run dev` serves the placeholder home page.
 - [ ] `npm run lint`, `npm run typecheck`, `npm test`, `npm run build` all pass locally.
 - [ ] Removing a required env var makes startup fail with a clear message naming the variable.
@@ -141,7 +141,7 @@ Implement Phase 00 exactly as described in phase-00-project-setup.md:
 6. Install better-auth and create stub lib/auth/server.ts + client.ts (no route yet).
 7. ESLint + Prettier (tailwind plugin), Vitest + Testing Library, and the
    lint/typecheck/test/format scripts.
-8. docker-compose.yml with postgres:16 and MinIO + bucket init.
+8. docker-compose.yml with postgres:16, MinIO + bucket init, and Mailpit.
 9. .github/workflows/ci.yml (lint, typecheck, test, build) and dependabot.yml.
 10. .coderabbit.yaml with the path instructions from the phase doc.
 11. Root CLAUDE.md using the template in 09-dev-workflow.md.

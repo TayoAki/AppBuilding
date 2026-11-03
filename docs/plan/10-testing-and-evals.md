@@ -9,7 +9,7 @@ The platform code is tested like any web app. The **agent** needs its own measur
 | Layer | Tool | What | Where |
 |---|---|---|---|
 | Unit | Vitest | `lib/crypto`, `lib/credits` (ledger math, reserve/settle), `lib/validate/*`, `lib/codemods/*` (inline-edit ops), `lib/vfs` path rules, plan-limit enforcement, theme contrast fixer, route table builder | `**/*.test.ts` |
-| Integration | Vitest + test Postgres (docker / testcontainers) | Route handlers with real DB: authz (other user → 404), project creation, run events append/tail, pg-boss enqueue → handler | `tests/integration/` |
+| Integration | Vitest + test Postgres (docker / testcontainers) | Route handlers with real DB: authz (other user → 404), project creation, project-scoped run events append/tail, charge + run + outbox in one transaction → dispatcher → pg-boss → handler | `tests/integration/` |
 | Preview runtime | Vitest (jsdom) + Playwright | Loader resolution, router shim behaviour, bridge message validation; fixture app renders all routes without errors in Chromium + WebKit | `preview-runtime/**/*.test.ts`, `tests/runtime/` |
 | E2E | Playwright | Golden path with a **recorded/mocked model** (§3): sign up → prompt → plan → build → preview → theme → inline edit → export zip | `tests/e2e/` |
 | Agent evals | custom harness (`evals/`) | Real model calls on a fixed prompt set; scored automatically (§2) | `npm run eval` |
@@ -19,46 +19,57 @@ CI runs unit + integration + runtime + e2e (mocked model) on every PR. The live-
 ## 2. Agent eval harness
 
 ### 2.1 Dataset (`evals/prompts.jsonl`)
-Start with **20 prompts**, then grow it from real user prompts (with consent) and from every bug report.
+**30 prompts** (ADR-003 #12), grown later from real user prompts (with consent) and from every bug report. **15 are held out** (never looked at while tuning prompts) and are the headline number.
 
-| Category | Examples | Count |
+| Category | Examples | Count (tune / held-out) |
 |---|---|---|
-| Classic CRUD | habit tracker, expense tracker with budgets, todo with tags | 5 |
-| Content/catalog | grocery store with cart, recipe browser, events list | 4 |
-| Media-heavy | travel journal with photos, fitness workout library | 3 |
-| Forms/flows | onboarding + sign-in + profile, booking flow | 3 |
-| Tricky | very short ("notes app"), very long multi-feature, non-English prompt, reference-image driven, conflicting requirements | 5 |
+| Classic CRUD | habit tracker, expense tracker with budgets, todo with tags | 4 / 4 |
+| Content/catalog | grocery store with cart, recipe browser, events list | 3 / 3 |
+| Media-heavy | travel journal with photos, fitness workout library | 2 / 2 |
+| Forms/flows | onboarding + sign-in + profile, booking flow | 3 / 3 |
+| Tricky | very short ("notes app"), very long multi-feature, non-English prompt, reference-image driven, conflicting requirements | 3 / 3 |
 
-Plus an **edit set** (`evals/edits.jsonl`), each a starting fixture + instruction:
+Plus an **edit set** (`evals/edits.jsonl`, 12 cases), each a starting fixture + instruction:
 - "add a settings screen with currency, dark mode and notifications" (must add a screen; the video's P4 bug),
-- "add a welcome screen" (must appear first),
-- "change the icon on this card to a leaf" with an `element_ref`,
+- "add a welcome screen" (must become `firstScreenId` and link onward),
+- "change the icon on this card to a leaf" with a `<selected-element>` block,
 - "sign up throws Cannot read properties of undefined (reading 'user')" with a seeded bug,
-- "make it dark" (should prefer a theme switch).
+- "make it dark" (must use `set_theme`, no screen rebuilt),
+- "add a screen" after an earlier request for a different screen in the same session (must add only the latest),
+- "make the cards rounder" (must edit one component, not screens),
+- remove a screen that two others link to (plan-guard must force those into `editScreens`),
+- a hand-edited screen followed by an unrelated change (hand edit survives, Phase 10b),
+- plus 3 regression cases from bug reports.
 
-### 2.2 Automatic scores (per app)
+Each case runs with **2 seeds** (two independent runs) per eval, because a single run can't separate a real regression from variance.
 
-| Metric | How | Target (v1) |
+### 2.2 Automatic scores
+
+Targets are **counts** on the held-out set across 2 seeds (15 prompts × 2 = 30 runs), so "≥ 27/30" is unambiguous.
+
+| Metric | How | Target (v1, held-out) |
 |---|---|---|
-| Plan valid | `AppPlanSchema` parses; screen count ≤ cap; routes unique | 100% |
-| Build completes | run `succeeded` without hitting the turn cap | ≥ 95% |
-| Static clean | 0 validator errors (`05` §4) after S3 | ≥ 95% |
-| Renders | render smoke test: every route mounts, 0 uncaught errors | ≥ 90% |
-| Interactions | scripted Playwright clicks on primary buttons don't throw; navigation targets exist | ≥ 85% |
-| Theme discipline | 0 literal colors outside `theme/` | ≥ 95% |
-| Edit success | edit set: expected file/screen changed, others untouched (diff check) | ≥ 90% |
-| Cost | USD per app (from `ai_usage`), p50/p90 | track; alert on +20% |
-| Latency | wall-clock to `run.done`, p50/p90 | track |
-| Cache hit | `cache_read_input_tokens / input_tokens` on S2 calls | ≥ 60% |
+| Plan valid | `propose_plan` input passes plan-guard first try (cap, unique ids, reachability, tabs 3–5, `firstScreenId`) | ≥ 28/30 (and 30/30 after the guard's tool-error retry) |
+| Build completes | build run reaches `run.done` (`succeeded`), no screen left `error` | ≥ 27/30 |
+| Files pass validation after ≤ 1 repair | validators (`05` §6) clean for every generated file after its single repair round | ≥ 27/30 runs with 0 failing files |
+| First-try pass rate | share of generated files that pass validation **without** a repair | track (≥ 70% of files); alert on −10 points |
+| Renders | render smoke test (sandbox): every route mounts, 0 uncaught errors | ≥ 27/30 |
+| Interactions | scripted Playwright taps on primary buttons don't throw; every `router.push` target exists | ≥ 25/30 |
+| Theme discipline | 0 color literals in generated files (except person-chosen ones in edit cases) | ≥ 28/30 |
+| Component use | screens import ≥ 1 shared component; no component redrawn inline (heuristic) | ≥ 25/30 |
+| Edit success | edit set: expected files/screens changed, others untouched (diff check), correct tool chosen | ≥ 21/24 (12 cases × 2 seeds) |
+| Cost | USD per app (from `ai_usage`, incl. repairs), p50/p90 | track; alert on +20%; p50 within 1.5× of `11` §2 |
+| Latency | wall-clock confirm → `run.done`, p50/p90 | track; the target is set from S2 measurements (ADR at G0) |
+| Cache hit | `cache_read_input_tokens / input_tokens` on Screen Builder calls after the first screen of a build | ≥ 60% |
 
 ### 2.3 Design quality (semi-automatic)
-- Screenshot every screen. Score each against a short rubric (hierarchy, spacing consistency, contrast, empty states, realistic data, no overflow/clipping) using a model-as-judge call with the screenshot and rubric. Spot-check about 10% by hand each run.
+- Screenshot every screen (sandbox render). Score each against a short rubric (hierarchy, spacing consistency, contrast, empty states, realistic data, no overflow/clipping) using a model-as-judge call with the screenshot and rubric. Spot-check about 10% by hand each run.
 - Keep a `evals/report.html` with the screenshot grid per run, so prompt changes can be compared visually side by side.
 
 ### 2.4 Process
-- Every change to `lib/ai/prompts/**`, `templates/expo-app/CONTRACT.md`, the component library, tools, or `AI_MODEL`/effort settings must include an eval run in the PR description (before → after on the metrics above).
-- Use a **train/test split**. Tune prompts on 14 prompts, and report the 6 held-out ones as the headline number, so you don't overfit to the demo prompts.
-- Budget: estimate cost per eval run first (prompts × p50 cost per app) and get approval for a spend ceiling. `npm run eval -- --limit 5` is the quick smoke variant.
+- Every change to `lib/ai/prompts/**`, `templates/expo-app/CONTRACT.md`, the generator rules, Planner tools, or `AI_MODEL`/`AI_BUILDER_MODEL`/effort settings must include an eval run in the PR description (before → after on the metrics above, held-out counts first).
+- Tune on the 15 tuning prompts only. Report the 15 held-out prompts as the headline. Rotate a few new held-out prompts in each quarter so the set doesn't get memorized by prompt tweaks.
+- Budget: estimate cost per eval run first (30 runs × p50 cost per app, plus edits) and get approval for a spend ceiling. `npm run eval -- --limit 5 --seeds 1` is the quick smoke variant.
 
 ## 3. Mocking the model for CI
 
@@ -68,6 +79,7 @@ Plus an **edit set** (`evals/edits.jsonl`), each a starting fixture + instructio
 
 ## 4. What "done" means for the agent work (Phases 06, 08, 09)
 
-- Unit tests for schemas, tools (path allowlist, staleness check), the validators and the loop's stop-reason handling (`refusal`, `max_tokens`, `pause_turn`, tool error → `is_error`).
+- Unit tests for: plan-guard (incl. `update_app` resulting-plan checks), generator output schemas, validators, the repair round (one rewrite, then keep-old / mark-error), the Planner loop's stop-reason handling (`refusal`, `max_tokens`, `pause_turn`, tool error → `is_error`), PROJECT STATE placement (last entry, after the user turn), and **append-only replay** (a test that fails if any earlier `messages.payload.api` entry changes between turns).
+- Worker tests: step jobs never finish the run early; a retried step after a crash takes over the lease; `failRun` only on the final attempt; outbox dispatch is idempotent.
 - Mocked-model e2e passes.
-- A live eval run on the full set meets the v1 targets in §2.2, or the PR documents the gap and a plan to close it.
+- A live eval run meets the §2.2 held-out targets, or the PR documents the gap and a plan to close it.

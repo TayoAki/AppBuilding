@@ -14,26 +14,26 @@ Each open decision lists the recommended default, so work can proceed if you don
 | D4 | **Use a boilerplate?** | create-next-app + manual setup · a Next.js boilerplate like the video's | create-next-app (fewer unknown files) | Phase 00 |
 | D5 | **Code reviewer** | CodeRabbit (video) · Claude Code `/code-review` in CI · none | CodeRabbit on PRs, plus CI checks required | Phase 00 |
 | D6 | **Job system** | pg-boss + own worker · Inngest · Trigger.dev · CloudHike Jobs | **pg-boss + worker** (no extra vendor, no tunnel) | Phase 05 |
-| D7 | **Expo SDK version** for generated apps | newest SDK supported by the published `snack-sdk` and by store Expo Go | **SDK 54** unless `snack-sdk` now supports newer (the reference app is pinned to 54 for this reason). Re-check at Phase 07 start. | Phase 07 |
+| D7 | **Expo SDK version** for generated apps | newest SDK supported by store Expo Go · an older SDK that Snack supports | **SDK 58** (decided, ADR-002): store Expo Go supports only 58, and published `snack-sdk` stops at 54. Phone preview uses a hosted Expo dev server (Path B); Snack only once it supports the template SDK. Re-check at Phase 00b S0. | Phase 00b |
 | D8 | **Preview runtime fallback** if the custom loader spike fails | Sandpack · Snack web player | Decide only if the spike fails its exit criteria (`07` §9) | Phase 07 |
-| D9 | **Models** (`AI_MODEL` Planner, `AI_BUILDER_MODEL` generators) | `claude-opus-5-5` · `claude-sonnet-5-5` (what the reference app runs for all agents, ≈ half the cost) | **Opus 5.5 for both** to start; switch `AI_BUILDER_MODEL` (and/or `AI_MODEL`) to Sonnet 5.5 only if the eval suite shows equal quality (`10`, `11` §4) | Phase 08 |
+| D9 | **Models** (`AI_MODEL` Planner, `AI_BUILDER_MODEL` generators) | `claude-opus-5-5` · `claude-sonnet-5-5` (what the reference app runs for all agents, ≈ half the cost) | **Opus 5.5 for both** to start; S2 measures both. Switch `AI_BUILDER_MODEL` (and/or `AI_MODEL`) to Sonnet 5.5 only if the held-out eval counts hold (`10` §2.2, `11` §4). Note that mid-conversation system messages aren't available on Sonnet 5 (fine on 5.5) | Phase 00b → 08 |
 | D10 | **Generated-app backend provider** (first adapter) | Supabase (public OAuth-for-integrations + Management API, RLS) · CloudHike (as video) · Firebase · own multi-tenant API | **Supabase** first (widely documented, Lovable-proven pattern), CloudHike as second adapter if you want parity with the video | Phase 13 |
 | D11 | **AI images provider** | ImageKit (video) · image model + our storage · stock photos | ImageKit | Phase 12 |
 | D12 | **GitHub integration type** | GitHub App · OAuth App with `repo` scope (video) | **GitHub App** | Phase 14 |
-| D13 | **iOS builds in v1?** | Yes (needs the user's Apple Developer account + ASC API key) · Android + web only at launch | Ship **Android + web first**; iOS behind a "beta" label | Phase 15 |
+| D13 | **iOS builds in v1?** | Yes (needs the owner's Apple Developer account, an ASC API key, and a distribution certificate created once, interactively or uploaded) · Android + web only at launch | Ship **Android + web first**; iOS behind a "beta" label with a guided one-time certificate setup (`15` §2) | Phase 15 |
 | D14 | **Web hosting for published apps** | EAS Hosting on the user's Expo account · our own static hosting under `*.apps.<brand>` | EAS Hosting (the user owns it; we don't host their content) | Phase 16 |
 | D15 | **Payments provider** | Stripe · Razorpay (India) · Paddle/Lemon Squeezy (merchant of record) | Stripe; consider a merchant of record if you need sales-tax handling | Phase 18 |
-| D16 | **Plan limits and prices** | see `11` §4 | Reference-app limits: Free 100 one-time credits, 2 projects, 5 screens/project, web publish but no native builds. Pro 1,000 monthly credits, unlimited projects, 10 screens/project, native builds. **Pro price to decide** ($49–99 on Opus, $25–49 on Sonnet per `11` §4) | Phase 18 |
-| D18 | **Credit model** | flat per action (reference app: 10/screen, 5/change round, 1/image) · cost-based (`CREDIT_MARKUP`/`CREDIT_USD_VALUE`) | **Flat**, plus a per-round file cap (`11` §5); keep cost-based as a fallback config | Phase 18 |
-| D17 | **Public showcase moderation** | auto-publish · admin approval | Admin approval queue for "show on homepage" | Phase 17 |
+| D16 | **Plan limits and prices** | see `11` §4 | Reference-app limits: Free 100 one-time credits (on email verification), 2 projects, 5 screens/project, placeholder images, web publish but no native builds. Pro 1,000 monthly credits, unlimited projects, 10 screens/project, AI images (4 credits each), native builds. **Pro price to decide** ($49–99 on Opus, $25–49 on Sonnet per `11` §4) | Phase 18 |
+| D18 | **Credit model** | flat per action (reference app: 10/screen, 5/change round, 1/image) · cost-based (`CREDIT_MARKUP`/`CREDIT_USD_VALUE`) | **Flat**: 10/screen, 5 per change round for ≤ 2 files (+3/extra file), **4 per AI image** (ADR-002/003); cost-based stays a fallback config | Phase 18 |
+| D17 | **Public showcase moderation** | auto-publish · admin approval | **Admin approval** for "show on homepage" (`projects.showcase_status`); a public link (`visibility = public`) works immediately | Phase 17 |
 
 ## 2. Open questions (need research at implementation time)
 
-- **Q1.** Does `snack-sdk` expose connected-device presence for the "iPhone connected" indicator shown in the video? If not, drop the indicator. (Phase 11)
-- **Q2.** Exact ImageKit generation URL syntax, limits and per-image price. (Phase 12)
-- **Q3.** The chosen backend provider's OAuth scopes and how to provision a project, apply SQL, and read keys via API. Is there a sandbox for testing? (Phase 13)
-- **Q4.** EAS non-interactive credentials: confirm `credentials.json` local Android credentials and the iOS ASC API key env vars work with `--non-interactive`. Confirm the EAS webhook signature header and algorithm. (Phase 15)
-- **Q5.** EAS Hosting: per-account limits, custom domains, and whether `eas deploy` can run fully non-interactively with an access token. (Phase 16)
+- **Q1. Answered (`15` §1):** `snack-sdk` exposes `state.connectedClients` (name, platform, status), so the indicator is possible on Path A. For Path B, the dev server's connected-client info is checked in S3; show "connected" only if available.
+- **Q2. Answered (`15` §5):** `{endpoint}/ik-genimg-prompt-{percent-encoded}/{path}/{file}`; the intermediate response has `is-intermediate-response: true`; cached by path; 65 units per image (≈ $0.12 at overage). Prompt length limit unknown (cap 200 chars).
+- **Q3. Answered for Supabase (`15` §6):** OAuth apps + Management API (create project, SQL query endpoint (beta), API keys with publishable/secret types). Store `db_pass`. Still open: CloudHike equivalents, if CloudHike is picked as an adapter.
+- **Q4. Answered (`15` §2–§3):** Android: EAS generates a keystore non-interactively, or use `credentials.json` + `credentialsSource: "local"`. iOS: ASC key env vars work, but a missing distribution certificate fails non-interactively. Webhooks: `expo-signature`, HMAC-SHA1, `sha1=<hex>`, per project. Use `EAS_NO_VCS=1`; set `owner`.
+- **Q5. Answered (`15` §4):** `eas deploy --prod --dev-domain <slug> --non-interactive --json`; free plan 100k requests/mo, 1 GB, 5 aliases, no custom domain; auth via `EXPO_TOKEN` (standard, 🟡).
 - **Q6.** Legal: ToS for hosted user content, the privacy policy (prompts/code go to the model provider under our API terms), and data retention for prompts and uploads.
 
 ## 3. Decision log (ADR-lite)

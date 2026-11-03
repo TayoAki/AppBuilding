@@ -66,11 +66,12 @@ Pure functions `(source, target, op) → newSource`, unit-tested.
 
 - Value validation: fontSize 6–96, spacing 0–200, enums for layout props, `^#[0-9a-fA-F]{6}$` for hex, and tokens must exist in the theme token list.
 
-### 5. Persist: splice edits into the base (`PUT /api/projects/:id/files`)
+### 5. Persist: splice edits into the base (`POST /api/projects/:id/files/edits`)
 - The client keeps, per file, `{ baseRevisionId, edits: [{afid, op}] }` for edits since the frames last compiled.
-- Debounced at 400 ms, it sends **all** pending edits for that file with `baseRevisionId`. The server re-applies the full list to the base revision's source (deterministic). It re-parses (must succeed) and runs the syntax, import and theme validators: literals are allowed because they're person-chosen, and **R10** keeps them on later AI edits. Then it writes a new revision with `author: "user_inline"`.
-- **Conflict rule:** if the file's current revision isn't the base or a `user_inline` descendant of it (the agent changed the file meanwhile), return `409 stale`. The client drops overrides, frames recompile, and the user re-selects.
-- Idempotent per `clientEditId`. Snack (Phase 11) and the canvas receive the new revision as a normal `file.written`. Frames in Edit mode **don't recompile** on `user_inline` revisions they produced themselves; overrides already show it.
+- Debounced at 400 ms, it sends **all** pending edits for that file with `baseRevisionId` (the revision the frames compiled) and `expectedHeadRevisionId` (the latest revision this client knows: the base, or its own last saved `user_inline` revision). The server re-applies the full list to the base revision's source (deterministic). It re-parses (must succeed) and runs the syntax, import and theme validators: literals are allowed because they're person-chosen, and **R10** keeps them on later AI edits. Then it writes a new revision with `author: "user_inline"`.
+- **Conflict rule (ADR-003 #14):** if the file's current revision ≠ `expectedHeadRevisionId` (the agent, a code save or another tab changed it meanwhile), return `409 stale` with the latest revision id. The client drops overrides, frames recompile, and the user re-selects.
+- **Lock:** if a run is writing this file right now (`runs.status = running` and `runs.step` targets this file's screen or component), return `423 locked`, with "AI is changing this screen".
+- Idempotent per `clientEditId`. The write emits `file.written {path, revisionId, author: "user_inline"}` on the **project-scoped event stream** (ADR-003 #5), so other tabs, collaborators and device preview (Phase 11) receive it. Frames in Edit mode **don't recompile** on `user_inline` revisions they produced themselves; overrides already show it.
 
 ### 6. Undo / redo
 - Per-session stack of edit lists. Undo removes the last edit from the pending list (or from a new list based on the latest base), re-persists, and updates overrides. ⌘Z / ⌘⇧Z while the inspector is focused.
@@ -85,7 +86,7 @@ preview-runtime/src/inspect.ts             (hover overlay, select, edit.override
 preview-runtime/src/bridge.ts              (+ edit.override)
 lib/codemods/{resolve.ts,ops.ts,apply.ts,print.ts,tokens.ts}
 lib/codemods/__tests__/*.test.ts
-app/api/projects/[projectId]/files/route.ts           (PUT: splice pending edits onto base)
+app/api/projects/[projectId]/files/edits/route.ts     (POST: splice pending edits onto base)
 app/api/projects/[projectId]/elements/resolve/route.ts
 components/inspector/{QuickEditPopover.tsx,AdvancedPanel.tsx,sections/*.tsx,TokenColorPicker.tsx,LiteralColorNote.tsx}
 components/canvas/PhoneFrame.tsx           (+ Edit icon per frame)
@@ -100,7 +101,9 @@ hooks/use-inline-editor.ts                 (pending edits per file, overrides br
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
 | POST | `/api/projects/:id/elements/resolve` | viewer | `{ afid, baseRevisionId }` → `{ kind: "named"\|"inline"\|"mixed"\|"dynamic", sharedCount, fileKind: "screen"\|"component", usedBy[], style, text?: {value, editable}, props }` |
-| PUT | `/api/projects/:id/files` | editor | `{ path, baseRevisionId, clientEditId, edits: [{afid, op}] }` → `{ revisionId }`; 400 invalid value; 409 stale; 422 dynamic target; 403 platform-owned file |
+| POST | `/api/projects/:id/files/edits` | editor | `{ path, baseRevisionId, expectedHeadRevisionId, clientEditId, edits: [{afid, op}] }` → `{ revisionId }`; 400 invalid value; 409 stale `{latestRevisionId}`; 422 dynamic target; 423 locked; 403 platform-owned file |
+
+Whole-file saves from the code editor use the separate `PUT /api/projects/:id/files/content` route (Phase 10b).
 
 ## Acceptance checklist
 - [ ] The Edit icon on a frame turns on Edit mode. Hover outlines appear, a click selects, and the quick popover shows current values. **Advanced** opens the full panel.
@@ -111,7 +114,8 @@ hooks/use-inline-editor.ts                 (pending edits per file, overrides br
 - [ ] Dynamic text (`{habit.name}`) is read-only, with **Edit with AI**.
 - [ ] **Edit with AI** attaches the element to chat. "Change this button's background to blue" changes only that element, with a literal hex (Phase 09).
 - [ ] A custom hex color survives a later AI edit of that screen, and the inspector notes that it doesn't follow theme switches. Token colors do follow theme switches.
-- [ ] If the agent changes the file while edits are pending, the server returns 409 and the UI recovers (re-select prompt), with no corrupted source.
+- [ ] If the agent changes the file while edits are pending, the server returns 409 and the UI recovers (re-select prompt), with no corrupted source. While a run is writing that file, edits return 423 with a clear message.
+- [ ] A second open tab of the same project shows the edit within ~1 s via the project-scoped stream.
 - [ ] Undo/redo works for the last 20 manual edits in the session.
 - [ ] No `ai_usage` or credit rows are created by manual edits.
 - [ ] **Security:** ops accept only allowlisted props and validated values. `setText` with `}</Text><Evil/>{` is escaped and round-trips as text. Platform-owned files return 403.
@@ -129,6 +133,7 @@ Read first:
   §9 one element per line)
 - docs/plan/13-reference-implementation.md (R6, R9, R10)
 - docs/plan/phases/phase-09-chat-edits.md (selectedElement payload)
+- docs/plan/12-decisions-and-open-questions.md ADR-003 (#5 project stream, #14 file routes)
 - docs/plan/phases/phase-10-inline-editing.md (this phase)
 - Existing: preview-runtime/src/{bridge.ts,inspector-plugin.ts}, lib/vfs, lib/validate
 
@@ -139,15 +144,16 @@ Implement, one commit per phase-doc step:
    custom hex marked as not following theme switches.
 3. lib/codemods/resolve.ts (@babel/parser + recast, formatting-preserving).
 4. lib/codemods/ops.ts with strict value validation + unit tests.
-5. PUT /files: re-apply ALL pending edits to baseRevisionId, validate, save user_inline
-   revision; 409 if the agent changed the file meanwhile. /elements/resolve.
+5. POST /files/edits: re-apply ALL pending edits to baseRevisionId, validate, save user_inline
+   revision; 409 if current head != expectedHeadRevisionId, 423 while a run writes that file;
+   emit file.written on the project-scoped stream. /elements/resolve.
 6. Undo/redo; "Manual edits" snapshot policy.
 
 Rules: NO LLM calls for manual edits, no credit/ai_usage rows. Edit with AI only attaches a
 selectedElement chip to chat (Phase 09 handles it). Dynamic values are read-only. Never edit
 platform-owned files. requireProjectAccess(): viewer for resolve, editor for PUT.
-Do NOT build: AI image generation/transform (Phase 12; just the image URL field), Snack, export,
-a free-form code editor.
+Do NOT build: AI image generation/transform (Phase 12; just the image URL field), device preview,
+export, the code editor (Phase 10b).
 
 Definition of done = Acceptance checklist in the phase doc.
 Finish with lint, typecheck, tests, and a short summary with before/after diffs of 3 sample edits.
@@ -158,4 +164,4 @@ Finish with lint, typecheck, tests, and a short summary with before/after diffs 
 - **recast + Babel TS:** use `recast/parsers/babel-ts`, or wrap `@babel/parser` with the same plugin set as the validator. Mismatched plugins cause parse failures on valid files.
 - **Shadows** differ between iOS (`shadow*`), Android (`elevation`) and web (`boxShadow` via react-native-web). Presets write all of them.
 - **Old projects** whose screens don't follow one-element-per-line still work: two same-type elements on one line remain selectable by column, but splicing may touch the shared line. Show "Edit with AI" as the safer option there.
-- Keep the inspector focused. Arbitrary-prop editing and a code editor belong in a later phase, if at all.
+- Keep the inspector focused. Arbitrary-prop editing isn't in scope. Whole-file code editing is Phase 10b.

@@ -4,7 +4,7 @@
 |---|---|
 | Video chapter(s) | New (not in video). It's the foundation the video's Ch.11 "Generate Mobile App with AI" (1:11:10) assumes; reference repo Ch.6 + Ch.9 runtime notes |
 | Branch | `feat/07-template-and-preview-runtime` |
-| Depends on | Phase 04 (workspace layout), Phase 05 (jobs & realtime; for `file.written` events) |
+| Depends on | Phase 00b (G0 passed; S1 runtime code + fixture already in `preview-runtime/`), Phase 04 (workspace layout, `screens` table), Phase 05 (project event stream, `file.written` / `plan.updated`) |
 | Effort (solo dev + Claude Code) | ~3–5 days. The ~3-day runtime spike now runs earlier, as S1 in Phase 00b, and its fixture + findings are reused here. |
 | New env vars | `PREVIEW_ORIGIN` (optional; defaults to sandboxed `srcdoc` iframes) |
 
@@ -26,15 +26,15 @@ Build the three things every later phase stands on:
 - R5: screens use generic hooks from `@/lib/backend` (`useCollection`, `useStoredValue`, `useAuth`, `uploadFile`) over a `BackendProvider` interface. The local provider is the default and in the preview keeps data in the workspace. Connecting a backend later changes no screen.
 - R6/R7: no fixed UI library. Each app gets its own `components/<Name>.tsx`, and the tab bar is one platform-generated `app/(tabs)/_layout.tsx`.
 - R8: `import { colors } from "@/theme"` works inside `StyleSheet.create`. In the preview the tokens are CSS variables, so a theme switch only sets variables.
-- R11: the reference app pinned **SDK 54**, because the published `snack-sdk` didn't go past it. Re-check that ceiling now.
+- R11 + `15` §1: the reference app pinned SDK 54 because the published `snack-sdk` stops there. Store Expo Go now runs **only SDK 58**, so we pin **SDK 58** (ADR-002) and phones use the hosted dev server (Phase 11 Path B), not Snack.
 - R9: generated markup is one element per line. The fixture follows that, so the inspector mapping is tested against realistic code.
 
 ## Steps
 
 ### 1. Pin the Expo SDK and scaffold the template
-- Check the newest SDK supported by the **published `snack-sdk`** and confirm store Expo Go opens it. Record the choice and date in `templates/expo-app/VERSION` (e.g. `expo-54@1`) and as D7 in `12-decisions-and-open-questions.md`.
-- `npx create-expo-app` at that SDK into `templates/expo-app/`, then strip it to the layout in `06` §2.
-- Templates for `package.json` (versions taken from `expo/bundledNativeModules.json` of the pinned `expo`), static `app.json` (`web.output: "single"`), `eas.json`, `babel.config.js` and `tsconfig.json` (with the `@/` alias), with placeholders `{{appName}} {{slug}} {{bundleId}} {{androidPackage}} {{scheme}} {{splashBg}}`.
+- **Pin SDK 58** (ADR-002: the SDK store Expo Go supports; confirm on the day, as in S0). Write `templates/expo-app/VERSION` = `expo-58@1` and record the date in D7. Record the published `snack-sdk` ceiling there too, so Phase 11 knows whether Path A is available.
+- `npx create-expo-app` at SDK 58 into `templates/expo-app/`, then strip it to the layout in `06` §2.
+- Templates for `package.json` (versions taken from `expo/bundledNativeModules.json` of the pinned `expo`), static `app.json` (`web.output: "single"` **set explicitly**: SDK 58 Expo Router defaults to `"server"`), `eas.json`, `babel.config.js` and `tsconfig.json` (with the `@/` alias), with placeholders `{{appName}} {{slug}} {{bundleId}} {{androidPackage}} {{scheme}} {{splashBg}}`.
 - `templates/expo-app/ALLOWED_IMPORTS.json` exactly as in `06` §4.
 
 ### 2. Theme system
@@ -55,20 +55,21 @@ Build the three things every later phase stands on:
 ### 5. `CONTRACT.md` (human-readable)
 `templates/expo-app/CONTRACT.md` documents the folder layout, ownership, imports, hooks, theme usage and editability rules for humans and code review. The **prompt** version of these rules lives in `lib/ai/prompts/rules.ts` (Phase 08, `05` §5); keep the two in sync.
 
-### 6. Fixture app
-`preview-runtime/fixtures/habit-tracker/`:
-- `plan.json`: an `AppPlan` with a `sign-in` stack screen (first), 3 tab screens (`today`, `progress`, `habits`), a `habit-detail` stack screen, 2 collections (`habits`, `checkins` with `habitId` references) with sample records, and a 5-theme package.
-- Hand-written `app/sign-in.tsx`, `app/(tabs)/{today,progress,habits}.tsx`, `app/habit-detail.tsx` and `components/{Button,ScreenHeader,EmptyState,HabitCard,StatTile}.tsx`, following the rules in `05` §5: `colors` tokens only, `@/lib/backend` hooks only, one element per line, no tab bar in screens.
+### 6. Fixture app (finalize the S1 fixture)
+`preview-runtime/fixtures/habit-tracker/` (created in Phase 00b S1; ADR-003 #10 fixes its shape):
+- `plan.json`: an `AppPlan` with a `sign-in` stack screen (first), **2 tab screens (`today`, `habits`)**, a `habit-detail` stack screen, 2 collections (`habits`, `checkins` with `habitId` references) with sample records, and a 5-theme package.
+- Hand-written `app/sign-in.tsx`, `app/(tabs)/{today,habits}.tsx`, `app/habit-detail.tsx` and **4 components** `components/{Button,ScreenHeader,EmptyState,HabitCard}.tsx`, following the rules in `05` §5: `colors` tokens only, `@/lib/backend` hooks only, one element per line, no tab bar in screens.
 - It must also run under real Expo: `materialize({target: "export"})` to a temp dir → `npx expo start`.
 
 ### 7. Virtual file system `lib/vfs`
-- Drizzle tables `project_files`, `file_revisions`, `project_snapshots`, `screens` (`03` §5).
+- Drizzle tables `project_files`, `file_revisions`, `project_snapshots` (`03` §5). `screens` already exists from Phase 04; don't recreate it.
 - `lib/vfs/paths.ts`: `assertWritable(path, author)` enforces `06` §3. Agents may write only `app/(tabs)/<id>.tsx`, `app/<id>.tsx` and `components/<Name>.tsx` (PascalCase). It also normalizes POSIX paths and rejects `..`, absolute paths, NUL bytes and every platform-rendered path.
 - `lib/vfs/files.ts`: `readFile`, `listFiles`, `writeFile({projectId, path, content, author, runId})` (sha256, no-op skip, revision + pointer update in one transaction), `deleteFile` (soft).
 - `lib/vfs/materialize.ts`: `materialize(projectId, {target, snapshotId?})` per `06` §10. `preview` = project files + rendered platform files. `export` adds configs, README and assets. `snack`, `eas` and `web` are **stubs that throw "not yet implemented"** until Phases 11, 15 and 16.
 - Unit tests: traversal rejection, ownership rules (agent can't write `theme/themes.ts`, `data/schema.ts`, `app/_layout.tsx` or `lib/backend/*`), the revision chain, no-op writes, and deterministic rendering (render twice → identical bytes).
 
-### 8. Preview runtime spike (per `07-preview-runtime.md` §9)
+### 8. Harden and test the preview runtime (S1 code graduated from Phase 00b)
+S1 already proved 8a–8h (gate G0). This step turns the spike code into production code: types, tests, error handling, Safari fixes, performance, and the production CSP. The list below is the inventory to cover:
 - 8a. `vendor.ts` + `build.mjs` (esbuild) → `public/preview-runtime/vendor.js` exposing `window.__AB_MODULES__`, built from the template's own pinned versions.
 - 8b. `loader.ts` + `transpile.ts` (`@babel/standalone`, TS + JSX → CJS; resolves `./`, `@/`, extensions and index files; sha cache).
 - 8c. Shims: `expo-router` (memory history; Stack, Tabs, Slot, Link, Redirect, `router.push/replace/back`, `useRouter`, `useLocalSearchParams`, `useSegments`, `usePathname`), `expo-haptics`, `expo-image-picker` (file input), `expo-clipboard`, `expo-linking`, `expo-location` and `expo-notifications` (permission-denied stubs), `expo-status-bar`, `react-native-safe-area-context`, and `@react-native-async-storage/async-storage` (**in-memory**, with the parent persisting snapshots via `storage.snapshot`/`storage.restore`, `07` §4). `routes.ts` builds the route table from `app/**`.
@@ -77,7 +78,9 @@ Build the three things every later phase stands on:
 - 8f. Frame mode with `initialRoute` → a dev page `/dev/preview-lab` with 4 frames.
 - 8g. Hot swap: textarea edit → `file.update` → module invalidation → re-render in < 300 ms.
 - 8h. Inspector Babel plugin (`07` §5) stamps `dataSet={{afid: "<path>:<line>:<col>"}}` on RN host elements and app components. A click logs `element.select`. `edit.override` handling is stubbed (Phase 10).
-- **Gate:** 8a–8h work in Chrome and Safari. If the router shim isn't viable by day 3, use the `07` §9 fallback and record it in `12`.
+- 8i. Production CSP on the runtime document: `default-src 'none'; script-src <runtime origin> 'unsafe-eval'; style-src 'unsafe-inline'; font-src <runtime origin> data:; img-src https: data: blob:; connect-src <backend URL when connected>` (ADR-003 #15). Ionicons must render under it.
+- 8j. **Harness for server-side renders:** `public/preview-runtime/harness.html` renders each route in turn from files posted to it. Phase 08's smoke test and Phase 17's thumbnails load it in the **sandbox service** from a local static server over the bundled `public/preview-runtime/` (ADR-003 #18), never from the web app's origin.
+- Tests: loader resolution, router shim (push/replace/back, params, tabs), bridge message validation (bad messages ignored), transpile cache, `afid` stamps on the fixture, CSS-variable theme switch, icons under CSP.
 
 ### 9. Wire the workspace to real files
 - `components/canvas/Canvas.tsx`: one `<PhoneFrame mode="frame">` per `screens` row at `canvas_x/canvas_y`. Off-screen frames show a snapshot instead of a live iframe (`07` §7).
@@ -99,14 +102,15 @@ templates/expo-app/lib/backend/{provider.ts,local.ts,index.ts}
 lib/theme/derive.ts
 lib/render/{themes.ts,schema.ts,seed.ts,layouts.ts,routes.ts,backend-config.ts,platform-files.ts}
 lib/vfs/{paths.ts,files.ts,materialize.ts,index.ts}
-lib/db/schema.ts                       (+ project_files, file_revisions, project_snapshots, screens)
+lib/db/schema.ts                       (+ project_files, file_revisions, project_snapshots; screens from Phase 04)
 preview-runtime/src/{vendor.ts,loader.ts,transpile.ts,routes.ts,bridge.ts,entry.tsx,theme-vars.ts}
 preview-runtime/src/shims/{expo-router.tsx,async-storage.ts,expo-haptics.ts,expo-image-picker.ts,
                            expo-clipboard.ts,expo-linking.ts,expo-location.ts,expo-notifications.ts,
                            expo-status-bar.ts,safe-area-context.tsx}
 preview-runtime/src/inspector-plugin.ts
 preview-runtime/fixtures/habit-tracker/{plan.json,app/**,components/**}
-preview-runtime/build.mjs              → public/preview-runtime/*
+preview-runtime/build.mjs              → public/preview-runtime/* (incl. harness.html)
+preview-runtime/**/*.test.ts
 components/canvas/{Canvas.tsx,PhoneFrame.tsx}
 components/workspace/{InteractivePreview.tsx,CodeView.tsx}
 lib/preview/{useProjectFiles.ts,frameBridge.ts}
@@ -117,7 +121,7 @@ scripts/seed-fixture-project.ts
 ```
 
 ## Database changes
-- New tables: `project_files`, `file_revisions`, `project_snapshots`, `screens` (exact columns in `03-data-model.md` §5).
+- New tables: `project_files`, `file_revisions`, `project_snapshots` (exact columns in `03-data-model.md` §5). `screens` exists from Phase 04.
 - Uses `projects.plan` (jsonb) and `projects.template_version`.
 - Index: `file_revisions (project_id, path, created_at desc)`.
 
@@ -133,14 +137,16 @@ No write API for file contents yet. Writes come from the generators (Phase 08), 
 
 ## Acceptance checklist
 - [ ] The fixture, materialized with target `export`, runs with `npx expo start` on iOS and Android (Expo Go) and on web.
-- [ ] The pinned SDK is documented with the date, checked against `snack-sdk` and Expo Go.
+- [ ] The template is pinned to SDK 58 (store Expo Go), with the date and the published `snack-sdk` ceiling recorded in D7. `app.json` sets `web.output: "single"` explicitly.
 - [ ] `lib/vfs` tests pass: `../`, absolute paths, `package.json`, `theme/themes.ts`, `data/seed.ts`, `app/_layout.tsx` and `lib/backend/x.ts` are rejected for `author: "agent"`; `components/habitCard.tsx` (not PascalCase) is rejected.
 - [ ] Platform rendering is deterministic: the same plan gives byte-identical `themes.ts`, `schema.ts`, `seed.ts` and layouts.
-- [ ] The seeded fixture shows 5 frames on the canvas. The interactive preview signs in (fake session), navigates the tabs, adds and completes a habit (data persists across a frame reload via parent snapshots), and **Reset data** restores the seed.
+- [ ] The seeded fixture shows 4 frames on the canvas. The interactive preview signs in (fake session), navigates the tabs, adds and completes a habit (data persists across a frame reload via parent snapshots), and **Reset data** restores the seed.
 - [ ] A local-provider write with an unknown field or a wrong type is rejected.
 - [ ] Switching theme in the dev lab recolors all frames instantly, with no re-transpile (verify in the transpile counter) and no app restart (in-memory state preserved).
 - [ ] Editing a fixture file and emitting `file.written` updates frames in < 1 s without a reload.
 - [ ] Clicking an element logs an `afid` mapping to the correct `path:line:col`.
+- [ ] Ionicons (tab bar and screen icons) render inside a sandboxed frame **under the production CSP** (`font-src <runtime origin> data:`); a test asserts icon glyphs aren't blank.
+- [ ] `harness.html` renders every fixture route headlessly (Playwright, run locally the same way the sandbox service will).
 - [ ] **Security:** iframes have `sandbox="allow-scripts"`, no `allow-same-origin`. Fixture code can't read the parent's cookies or `fetch('/api/projects')` with credentials (test asserts it).
 - [ ] **AuthZ:** file and screen routes return 404 for non-members (two-user test).
 - [ ] With 10 frames, off-screen frames aren't live iframes, and panning stays smooth on a mid-range laptop.
@@ -158,19 +164,18 @@ Read first, in order:
 - docs/plan/phases/phase-07-template-and-preview-runtime.md (this phase)
 
 Scope, one commit per numbered step of the phase doc:
-1. templates/expo-app pinned to ONE Expo SDK (newest supported by the published
-   snack-sdk and opened by store Expo Go). Tell me the SDK and why before scaffolding.
+1. templates/expo-app pinned to Expo SDK 58 (store Expo Go; see docs/plan/15-vendor-facts.md
+   §1 and ADR-002). Confirm Expo Go's current SDK before scaffolding; set web.output "single".
 2. lib/theme/derive.ts (token derivation + contrast) and the platform renderers in
    lib/render (themes, schema, seed, layouts, routes, backend config). Deterministic output.
 3. Template @/theme (colors) and @/lib/backend (provider interface, local provider with
    write validation, useCollection/useStoredValue/useAuth/uploadFile hooks).
-4. Fixture app: plan.json + hand-written screens and components following
-   docs/plan/05-ai-agent-design.md §5 rules (tokens only, hooks only, one element per line).
+4. Finalize the S1 fixture: sign-in + 2 tabs (today, habits) + habit-detail, 4 components,
+   2 collections, following docs/plan/05-ai-agent-design.md §5 rules.
 5. lib/vfs (ownership allowlist per 06 §3, revisions, materialize with targets; snack/eas/web
    targets throw "not yet implemented") + tables + unit tests.
-6. Preview runtime spike 8a–8h (shims, in-memory AsyncStorage with parent snapshots,
-   CSS-variable @/theme with theme.set, inspector plugin). STOP and report after 8e if the
-   router shim looks infeasible; don't silently switch approaches.
+6. Harden and test the preview runtime that graduated from spike S1 (8a–8j): types, tests,
+   Safari, performance, production CSP incl. font-src, and harness.html for server-side renders.
 7. Wire canvas frames, interactive preview (Reset data) and read-only Code tab (generated
    files badged) to real project files; subscribe to file.written.
 8. scripts/seed-fixture-project.ts (dev only).
@@ -193,7 +198,7 @@ decision that should go into docs/plan/12-decisions-and-open-questions.md.
 - **CSS variables and react-native-web:** check that RNW passes `var(--…)` strings through for every style prop the generators use (colors, borderColor, shadowColor, backgroundColor, icon `color`). Props RNW converts in JS, such as some shadow handling, may need the runtime to resolve the token to a literal and re-render on `theme.set`. Write a test screen covering every token usage.
 - `@babel/standalone` is ~2 MB. Load it once in the vendor bundle; transpile only changed files.
 - Expo Router conventions for `routes.ts`: `(group)` folders don't add segments; `_layout.tsx` nesting; `index.tsx`; `+not-found.tsx`. The generators only produce flat `/<id>` and `/(tabs)/<id>` routes, so keep the shim small. A pattern the shim can't support gets banned in the rules, not added to the shim.
-- `@expo/vector-icons` on web needs font files. Ship them with the vendor bundle and register `@font-face`.
+- `@expo/vector-icons` on web needs font files. Ship them with the vendor bundle, register `@font-face`, and allow them in the CSP (`font-src`). Without that, icons render blank.
 - Opaque-origin iframes can't use `localStorage` (it throws). The AsyncStorage shim is in-memory, namespaced by `projectId + frameId`, and the parent persists snapshots.
 - Safari is the usual troublemaker (iframe transforms, `ResizeObserver` timing). Test early.
 - Don't build a platform UI component library. The reference app showed per-app generated components work and make edits cheap (R6).

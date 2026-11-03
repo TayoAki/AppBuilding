@@ -9,14 +9,14 @@
 | New env vars | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` (now required) |
 
 ## Goal
-When a signed-in user submits the prompt box, the platform uploads attachments directly to object storage, creates a `projects` row with its `project_assets`, saves the prompt as the first `messages` row, creates a `runs` row of kind `plan`, and redirects to `/workspace/[projectId]`. The actual job enqueue is a stub until Phase 05/06. A failed or partial upload never leaves orphan "ready" assets.
+When a signed-in user submits the prompt box, the platform uploads attachments directly to object storage, creates a `projects` row with its `project_assets`, saves the prompt as the first `messages` row, creates a `runs` row of kind `chat` (the Planner's first turn), and redirects to `/workspace/[projectId]`. The enqueue call is made inside the same transaction, through a stub with the final outbox signature (Phase 05 makes it real; Phase 06 adds the handler). A failed or partial upload never leaves orphan "ready" assets.
 
 ## What we do differently from the video (and why)
 - **Presigned PUT uploads straight to storage**, not files posted through a Next.js route. Serverless body limits are ~4.5 MB, while our limit is 10 MB × 5. It's also cheaper and faster.
 - **Server-side verification after upload:** `HEAD` for the real size, plus a magic-byte sniff of the first bytes to confirm it's actually an image. Assets go `pending_upload → ready | rejected`. The video trusts the client.
 - **`StorageProvider` interface.** The S3 API covers MinIO, AWS S3, Cloudflare R2, Railway buckets and CloudHike storage. Switching vendors is an env change, not a code change.
 - **Uploads first, project second, with no DB rows until create succeeds.** Files go to a temporary prefix (`tmp/`) with signed upload tokens. `POST /api/projects` verifies them, copies them to their final keys and inserts everything in one transaction. Abandoned uploads are deleted by a bucket lifecycle rule, so there are no orphan rows and no FK problems from assets created before their project.
-- **`runs` + `messages` rows are created now** (tables from `03-data-model.md`), so Phase 05/06 only adds the enqueue call.
+- **`runs` + `messages` rows are created now** (tables from `03-data-model.md`), and `enqueue(tx, "agent.chat", …)` is already called in the create transaction, so Phase 05 only swaps the stub for the outbox insert.
 
 ## Steps
 
@@ -62,9 +62,9 @@ Add `projects` and `project_assets` (columns per `03-data-model.md` §2), plus t
 - Body: `{ prompt, platforms, uploads: [{ uploadId, uploadToken }] }` (Zod: prompt length per `PROMPT_LIMITS`, platforms non-empty, ≤ 5 uploads).
 - For each upload: verify the token (signature, `userId` matches the session, not expired). `head(tmp key)` → size matches the token. `getRange(0, 15)` → magic bytes match PNG/JPEG/WEBP/GIF. If any upload fails, delete those tmp objects and return 422 listing them.
 - `projectId = newId("prj")`. Copy each verified tmp object to its final key (`assetId = newId("ast")`).
-- In **one transaction**: insert `projects` (`status: "planning"`, `title`: placeholder from the first words of the prompt; the agent renames it in Phase 06, `template_version` from `templates/expo-app/VERSION` or `"unset"` until Phase 07). Insert `project_assets` rows (`kind: "reference_image"`, `status: "ready"`, verified mime/size, width/height if cheaply available). Insert `messages` (`role: "user"`, `kind: "text"`, `content: prompt`, `attachments: assetIds`). Insert `runs` (`kind: "plan"`, `status: "queued"`, `input: { messageId }`).
+- In **one transaction**: insert `projects` (`status: "planning"`, `title`: placeholder from the first words of the prompt; the agent renames it in Phase 06, `template_version` from `templates/expo-app/VERSION` or `"unset"` until Phase 07). Insert `project_assets` rows (`kind: "reference_image"`, `status: "ready"`, verified mime/size, width/height if cheaply available). Insert `messages` (`role: "user"`, `kind: "text"`, `content: prompt`, `attachments: assetIds`). Insert `runs` (`kind: "chat"`, `status: "queued"`, `input: { messageId }`, `created_by` = `billed_user_id` = the user). Call `enqueueChat(tx, {runId, projectId, userId, messageId})` **inside the transaction**.
 - If the transaction fails, delete the copied final objects (best effort). The tmp objects expire anyway.
-- After commit: `await enqueuePlan(runId)` — **a stub in `lib/jobs/enqueue.ts` that just logs** until Phase 05 wires pg-boss and Phase 06 the handler.
+- `enqueueChat` is a thin helper over `enqueue(tx, "agent.chat", data)` in `lib/jobs/enqueue.ts`. In this phase `enqueue` is **a stub that just logs** (same signature, takes the transaction). Phase 05 makes it insert a `job_outbox` row; Phase 06 adds the handler.
 - Return `{ projectId, runId }`.
 
 ### 8. Prompt box integration
@@ -86,7 +86,7 @@ Now that `projects` exists: owner check (members come in Phase 14), `deleted_at 
 lib/providers/storage/{index.ts,s3.ts}
 lib/uploads/{client.ts,verify.ts,cleanup.ts}
 lib/db/schema/{projects.ts,messages.ts,runs.ts}
-lib/jobs/enqueue.ts                      (stub)
+lib/jobs/enqueue.ts                      (stub: enqueue(tx, name, data) + enqueueChat)
 lib/auth/require.ts                      (real project lookup)
 app/api/uploads/presign/route.ts
 app/api/projects/route.ts                (POST)
@@ -97,7 +97,7 @@ drizzle/0002_projects.sql
 ```
 
 ## Database changes
-- `projects` (§2), `project_assets` (§2), `messages` (§3), `runs` (§4, minimal: id, project_id, kind, status, input, output, error, created_at).
+- `projects` (§2), `project_assets` (§2), `messages` (§3), `runs` (§4, minimal: id, project_id, kind, status, input, output, error, created_by, billed_user_id, created_at). Phase 05 adds the job/step columns.
 - Indexes: `projects (owner_id, deleted_at, updated_at desc)`, `messages (project_id, created_at)`, `runs (project_id, created_at desc)`.
 
 ## API surface
@@ -109,7 +109,7 @@ drizzle/0002_projects.sql
 
 ## Acceptance checklist
 - [ ] Submitting with 2 images shows per-file progress, then lands on `/workspace/{id}` with the prompt and thumbnails.
-- [ ] DB has the `projects`, 2 `project_assets` (`ready`), 1 `messages` and 1 `runs` (`plan`, `queued`) rows. Objects exist in the bucket under the documented key layout.
+- [ ] DB has the `projects`, 2 `project_assets` (`ready`), 1 `messages` and 1 `runs` (`chat`, `queued`, `created_by` set) rows. The logged stub shows `agent.chat` was enqueued inside the transaction. Objects exist in the bucket under the documented key layout.
 - [ ] A file renamed `evil.png` that is really HTML/SVG/EXE is rejected server-side (magic bytes), its object is deleted, and the UI explains why.
 - [ ] Changing the declared size or type after presigning makes the PUT fail (signature mismatch).
 - [ ] A tampered, expired or other user's `uploadToken` makes `POST /api/projects` fail (403) and nothing is created.
@@ -137,8 +137,9 @@ Implement Phase 03:
    prompt-box flow: presign → upload → create → redirect, with status text.
 5. POST /api/projects: verify each uploadToken + object (HEAD size + magic bytes for
    png/jpeg/webp/gif), copy to final keys, then in ONE transaction create project +
-   project_assets(ready) + message + run(kind=plan,status=queued);
-   after commit call enqueuePlan(runId) from lib/jobs/enqueue.ts, which is a logging
+   project_assets(ready) + message + run(kind=chat,status=queued,created_by,billed_user_id)
+   and call enqueueChat(tx, {runId, projectId, userId, messageId}) inside that transaction;
+   lib/jobs/enqueue.ts enqueue(tx, name, data) is a logging
    stub for now.
 6. Real requireProjectAccess (owner only, 404 otherwise) and a placeholder
    /workspace/[projectId] page showing prompt + thumbnails via presigned GET.
@@ -156,4 +157,4 @@ Finish with lint/typecheck/test and a summary.
 - Re-encoding images (e.g. with `sharp`) to strip EXIF/GPS is a cheap privacy win. Add it if you serve reference images publicly (showcase).
 - Presigned URL expiry: 10 minutes is plenty. Never return a presigned GET with a long expiry for private assets.
 - Don't put the original filename in the storage key (path traversal, Unicode weirdness, PII).
-- The video stored a "status: planning" project and then navigated to a placeholder page. Same here. The plan job actually runs from Phase 06.
+- The video stored a "status: planning" project and then navigated to a placeholder page. Same here. The Planner's first `agent.chat` turn actually runs from Phase 06.

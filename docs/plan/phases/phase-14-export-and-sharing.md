@@ -35,7 +35,7 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 `lib/validate/secrets.ts`: regex + entropy checks (private key headers, `sk_live_`, `service_role`, `ghp_`, `github_pat_`, AWS keys, JWTs with a `service_role` claim). It runs on materialized files and returns findings with path + line. Used by zip, GitHub, and later EAS/web.
 
 ### 3. Zip export job
-- `POST /api/projects/:id/export/zip` → `requireProjectAccess(viewer)` (owner can decide later whether viewers may export; default **editor**) → run `export_zip` → job.
+- `POST /api/projects/:id/export/zip` → `requireProjectAccess(editor)` (per the `08` §2 matrix) → in one transaction insert the run (`kind = export_zip`, `created_by`, `billed_user_id` = owner) and a `job_outbox` row (ADR-003 #7). The outbox dispatcher enqueues the job with payload `{runId, projectId, userId}`.
 - Worker `export-zip.ts`: materialize → secret scan → stream into a zip (`archiver`/`yazl`) → upload to `exports/{projectId}/{runId}.zip` → `runs.output = { storageKey, bytes }`.
 - `GET /api/runs/:runId/download` → authz → 302 to a signed URL (5 min TTL).
 - UI: Export menu → "Download as zip" → progress "Packaging your project…" (run events) → auto-download.
@@ -47,13 +47,13 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 
 ### 5. Repo picker / create
 - `GET /api/github/repos` → list repos the installation can access (paginate, search).
-- `POST /api/github/repos` `{ name, private, description }` → validate the name → create the repo under the user's account → returns `{ owner, repo, defaultBranch }`.
+- `POST /api/github/repos` `{ name, private, description }` → validate the name → create the repo under the user's account with **`auto_init: true`** → returns `{ owner, repo, defaultBranch }`.
 - Dialog: "Create new repo" (prefilled slug, private toggle, description "Built with AppBuilding") or "Use existing repo".
 
 ### 6. Push job `export.github`
 Worker `export-github.ts`:
 1. Materialize the current snapshot (create one if needed); secret scan.
-2. Check whether the repo is **empty** (no commits / no default-branch ref). If it is: create blobs for each file, a tree, a **root commit**, and `refs/heads/<default>`. This is the only case that writes to the default branch.
+2. Check whether the repo is **empty** (no commits / no default-branch ref). If it is, write the **first commit with the Contents API** (`PUT /repos/{owner}/{repo}/contents/{path}` for one small file, e.g. `README.md`). The Git Data API returns `409 Git Repository is empty` on repos with no commits (ADR-003 #16). Then add the remaining files with the Git Data API (blobs → tree with `base_tree` = that commit's tree → commit → update `refs/heads/<default>`). This is the only case that writes to the default branch. When **we** create the repo (step 5), create it with `auto_init: true` instead and treat it as empty: the only commit is the auto README, which our first push replaces on the default branch.
 3. Otherwise (a later push, *or* a first push into an existing repo that already has commits): diff against `last_pushed_snapshot_id` if set (skip unchanged blobs), create branch `appbuilding/update-<yyyyMMdd-HHmmss>` from the default head, commit with a meaningful message ("Add Settings screen; restyle HabitCard", built from the run summaries since the last push), then open a PR with a body listing changed screens/components/files.
 4. Save `last_pushed_snapshot_id`, `last_commit_sha` (for update pushes, the branch commit; merge state is the user's business).
 5. `runs.output = { commitUrl, prUrl? }`.
@@ -107,10 +107,11 @@ Worker `export-github.ts`:
 - [ ] Downloaded zip unpacks to a project that runs with `npm install && npx expo start` and opens in Expo Go.
 - [ ] Zip contains README with run instructions; contains no `*.jks`, no secrets (scanner test with a planted fake key blocks export).
 - [ ] Connect GitHub → create repo with an invalid name shows inline validation; valid name creates the repo.
-- [ ] Pushing to a new empty repo lands on the default branch with all files. A second push after a theme change creates `appbuilding/update-*` and a PR with only changed files. A first push into an existing non-empty repo also goes to a new branch (the default branch is untouched).
+- [ ] Pushing to a new empty repo (created outside AppBuilding with no commits, **and** one created by AppBuilding with `auto_init`) lands on the default branch with all files, with no 409 from the Git Data API. A second push after a theme change creates `appbuilding/update-*` and a PR with only changed files. A first push into an existing non-empty repo also goes to a new branch (the default branch is untouched).
 - [ ] GitHub tokens are stored encrypted; disconnecting GitHub deletes them.
 - [ ] Share by email: existing user gets access immediately; a new email gets an invite that works only for that email; expired tokens are rejected.
-- [ ] Viewer can open the workspace read-only (chat input, inline edit, export-to-GitHub disabled); non-member gets 404/403 on every project route.
+- [ ] Viewer can open the workspace read-only (chat input, inline edit, zip export and GitHub push disabled, per the `08` §2 matrix); non-member gets 404 on every project route.
+- [ ] Every export run records `created_by` (acting user) and `billed_user_id` (owner).
 - [ ] Download URLs expire and are only issued to project members.
 
 ## Claude Code prompt
@@ -121,7 +122,8 @@ Read first:
 - docs/plan/phases/phase-14-export-and-sharing.md (scope + acceptance checklist)
 - docs/plan/06-generated-app-template.md §10 (materialize)
 - docs/plan/03-data-model.md §2 (project_members), §5 (snapshots), §7 (oauth_connections, project_github_repos)
-- docs/plan/08-security.md (authz roles, token encryption, secrets)
+- docs/plan/08-security.md (§2 role matrix is authoritative, token encryption, secrets)
+- docs/plan/12-decisions-and-open-questions.md ADR-003 (#3 actors, #7 outbox, #16 empty repos)
 
 Implement:
 1. README/.gitignore in materialize + lib/validate/secrets.ts scanner (block exports on findings).
@@ -131,7 +133,10 @@ Implement:
 4. export_github worker job via the Git Data API: commit to the default branch ONLY if the repo is
    empty (root commit); every other push (incl. first push into a non-empty repo) goes to branch
    appbuilding/update-<timestamp> + a PR with a meaningful message; only changed blobs; store last_commit_sha.
-   Use materialize({target:"export"}) (versions from bundledNativeModules.json, static app.json).
+   Empty repos: first commit via the Contents API (Git Data API 409s on repos with no commits); repos we
+   create use auto_init. Use materialize({target:"export"}) (versions from bundledNativeModules.json,
+   static app.json with web.output "single").
+   Jobs are enqueued via the job_outbox in the same transaction as the run row (ADR-003 #7).
 5. Sharing: start with 7a (view-only, existing accounts, mutations owner-only); then 7b if in scope:
    viewer/editor roles, invite email with hashed token, accept flow. requireProjectAccess role checks
    on every /api/projects/* route; viewer = read-only UI.
@@ -149,9 +154,9 @@ Finish by running lint, typecheck, tests; summarize changes and the manual GitHu
 
 ## Pitfalls & notes
 - **GitHub App vs repo creation.** Creating a repo for a *user* account through an App requires the Administration permission and the user's authorization. If that's awkward, fall back to "create the repo on GitHub, then select it": the picker still works. Decide during implementation after reading current docs.
-- **Empty repos.** A brand-new repo with no commits has no ref to base on. Create a root commit (no parents) and then create `refs/heads/main`. Creating with `auto_init` avoids this but adds an unwanted README commit.
+- **Empty repos.** The Git Data API refuses blobs/trees/commits on a repo with **no commits** (409 "Git Repository is empty"). Seed the first commit through the Contents API, or create repos with `auto_init: true`. A repo whose only commit is GitHub's auto-generated README counts as "empty" for the default-branch rule.
 - **Rate limits.** One blob per file is fine for ~100 files. Skip unchanged blobs by sha, and batch with modest concurrency (5).
 - **Binary assets.** Upload as base64 blobs; keep images reasonably sized (Phase 12 uses URLs, so few binaries are expected).
 - **The callback URL must match exactly.** The video's push failed because of a stray `.` in the registered redirect URI. Copy it from `NEXT_PUBLIC_APP_URL` + path, and register separate dev/prod apps.
 - **Never auto-merge** the update PR. That's the user's call (the video's behavior, and the right one).
-- **Viewer export.** Default: viewers can't export or push. Make it an owner toggle later if needed.
+- **Viewer export.** Viewers can't export or push (`08` §2 matrix). Make it an owner toggle later if needed.

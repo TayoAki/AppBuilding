@@ -4,7 +4,7 @@
 |---|---|
 | Video chapter(s) | New. The video and the reference app show code read-only and say "you own the code" only via export. |
 | Branch | `feat/10b-code-editing` |
-| Depends on | Phase 07 (VFS, Code tab), Phase 08 (validators), Phase 10 (splice/persist path, `PUT /api/projects/:id/files`) |
+| Depends on | Phase 05 (project-scoped event stream), Phase 07 (VFS, Code tab), Phase 08 (validators), Phase 10 (conflict/lock rules) |
 | Effort (solo dev + Claude Code) | ~1.5–2 days |
 | New env vars | none |
 
@@ -22,11 +22,11 @@ People can edit screen and component code directly in the Code tab, save, and se
 - Header: path, "Edited by you / by AI · time", **Save** (⌘S), **Revert to previous**, **Diff** (Monaco diff vs the previous revision).
 
 ### 2. Save path
-- `PUT /api/projects/:id/files` (exists from Phase 10) with `{ path, content, baseRevisionId }`.
+- `PUT /api/projects/:id/files/content` (new; separate from Phase 10's `POST …/files/edits`, ADR-003 #14) with `{ path, content, baseRevisionId }`.
 - **Conflict check:** if the current revision ≠ `baseRevisionId` (the agent or an inline edit changed it), return `409` with the latest content. The UI offers a 3-way merge view or "keep mine / take theirs".
-- **Run lock:** while a build/change run is writing this file (`runs.steps` says `screen:<id>` is running), saves to that file return `423 Locked`, with "AI is changing this screen". Other files stay editable.
+- **Run lock:** while a build/change run is writing this file (`runs.status = running` and `runs.step` targets this file's screen or component, the same rule as Phase 10), saves to that file return `423 Locked`, with "AI is changing this screen". Other files stay editable.
 - Validate with the same pipeline as generators (`05` §6). Syntax errors and disallowed imports block the save (the error is shown inline). Theme or data-discipline issues are **warnings** that allow saving: a person's literal colors are legitimate (`06` §5).
-- Write `file_revisions(author = "user_code")` and emit `file.written`. Frames hot-swap and Snack sessions update. No credits charged.
+- Write `file_revisions(author = "user_code")` and emit `file.written {path, revisionId, author: "user_code"}` on the **project-scoped event stream** (ADR-003 #5). Frames hot-swap, other tabs refresh, and device preview sessions (Phase 11) receive the file. No credits charged.
 
 ### 3. AI awareness
 - PROJECT STATE (`05` §3.1) lists screens and components the person edited by hand since the last AI change. The Planner rule: "When changing a file the person edited, keep their changes unless the request says otherwise."
@@ -43,7 +43,7 @@ components/workspace/CodeEditor.tsx        (Monaco, lazy)
 components/workspace/MergeDialog.tsx
 lib/vfs/editable.ts                        (isEditablePath, readOnlyReason)
 lib/validate/forUserSave.ts                (error vs warning policy)
-app/api/projects/[projectId]/files/route.ts   (PUT: baseRevisionId, 409/423)
+app/api/projects/[projectId]/files/content/route.ts   (PUT: baseRevisionId, 409/422/423)
 lib/ai/prompts/state.ts                    (hand-edited files list in PROJECT STATE)
 ```
 
@@ -53,11 +53,11 @@ None. Uses `file_revisions.author = 'user_code'` and `parent_revision_id`.
 ## API surface
 | Method | Path | Auth | Body → Response |
 |---|---|---|---|
-| PUT | `/api/projects/:id/files` | editor | `{path, content, baseRevisionId}` → `200 {revisionId, warnings[]}` · `409 {latest}` · `422 {errors[]}` · `423 {reason}` |
+| PUT | `/api/projects/:id/files/content` | editor | `{path, content, baseRevisionId}` → `200 {revisionId, warnings[]}` · `409 {latestRevisionId, latestContent}` (current ≠ base) · `422 {errors[]}` · `423 {reason}` · `403` platform-owned path |
 | GET | `/api/projects/:id/files/:path/revisions` | viewer | → `[{revisionId, author, createdAt}]` |
 
 ## Acceptance checklist
-- [ ] Editing a screen and saving updates all frames and a connected phone without reload/rescan.
+- [ ] Editing a screen and saving updates all frames, a second open tab, and a connected phone without reload/rescan.
 - [ ] A syntax error blocks the save with an inline marker; a literal color saves with a warning.
 - [ ] Platform-derived files open read-only with a reason and a pointer to where they're changed.
 - [ ] A concurrent AI change produces `409` and a working merge dialog; saving during an AI write to that file gives `423`.
@@ -74,9 +74,10 @@ docs/plan/phases/phase-10-inline-editing.md (save path).
 Implement Phase 10b exactly:
 1. Monaco editor (lazy) for editable paths only (screens, components); read-only with a
    reason for platform-derived files. Add type stubs so completion works.
-2. PUT /api/projects/:id/files with baseRevisionId → 409 with latest content on conflict,
-   423 while a run is writing that file, 422 on blocking validation errors, warnings otherwise.
-3. Save writes file_revisions(author=user_code), emits file.written; frames + Snack update.
+2. PUT /api/projects/:id/files/content with baseRevisionId → 409 with latest content when the
+   current revision != base, 423 while a run is writing that file (runs.step + status), 422 on
+   blocking validation errors, warnings otherwise. Emit file.written on the project stream.
+3. Save writes file_revisions(author=user_code); frames, other tabs and device preview update.
 4. Merge dialog (keep mine / take theirs / manual) and Diff/Revert.
 5. PROJECT STATE lists hand-edited files; Planner rule to preserve hand edits.
 6. Tests: editable-path rules, conflict/lock responses, authz, and an eval case that a hand

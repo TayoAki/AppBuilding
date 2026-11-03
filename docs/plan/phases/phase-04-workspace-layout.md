@@ -42,7 +42,7 @@ type WorkspaceState = {
 ```
 
 ### 3. Header
-`components/workspace/header.tsx`: logo (links home) · editable project title (inline rename → `PATCH /api/projects/:id` for owners/editors) · run status pill (`planning`/`building`/`ready`/`error`) · **theme dots slot** (empty until Phase 08) · right side: **Connect backend**, **Share**, **Export**, **Publish** (all disabled stubs with tooltips) · user avatar menu.
+`components/workspace/header.tsx`: logo (links home) · editable project title (inline rename → `PATCH /api/projects/:id` for owners/editors) · project status pill (`planning`/`awaiting_confirmation`/`building`/`ready`/`failed`, per `03` §2) · **theme dots slot** (empty until Phase 08) · right side: **Connect backend**, **Share**, **Export**, **Publish** (all disabled stubs with tooltips) · user avatar menu.
 
 ### 4. Three-panel layout
 shadcn `Resizable` (`react-resizable-panels`): left chat (default 26%, min 20%), center canvas (flex), right preview/code (default 30%, min 24%). Save sizes per user in `localStorage` (`autoSaveId`). Under 1024 px, switch to a tab bar (Chat / Canvas / Preview) instead of side-by-side panels.
@@ -63,10 +63,10 @@ shadcn `Resizable` (`react-resizable-panels`): left chat (default 26%, min 20%),
 ### 7. Right panel
 `components/workspace/right-panel.tsx` with tabs:
 - **Preview**: a single larger phone frame (content slot, Phase 07 mounts the interactive runtime) and a route dropdown. Header row: **Open on device (QR)** button (opens a popover; disabled stub until Phase 11), reload button, "Reset data" button.
-- **Code**: file tree (`components/workspace/file-tree.tsx`, grouped by folder) plus a **read-only** viewer. Use Shiki (lighter) for v1. Monaco is only needed if a code editor is added later. Copy-file button. It's empty until Phase 08 writes files, so add a demo fixture behind `?demo=1` to develop against.
+- **Code**: file tree (`components/workspace/file-tree.tsx`, grouped by folder) plus a **read-only** viewer. Use Shiki (lighter) for v1. Phase 10b swaps in a Monaco editor for editable files. Copy-file button. It's empty until Phase 08 writes files, so add a demo fixture behind `?demo=1` to develop against.
 
 ### 8. Screens table (minimal)
-Add the `screens` table now (`03-data-model.md` §5), since it holds canvas positions. Phase 08 fills it from the plan.
+Add the `screens` table now (`03-data-model.md` §5), since it holds canvas positions. **This is the only phase that creates it**; Phase 06 upserts rows on confirm and Phase 08 updates statuses.
 
 ### 9. Keyboard shortcuts
 `V` select, `H` hand, `Cmd/Ctrl+0` fit, `Cmd/Ctrl+±` zoom, `Esc` deselect. Ignore them while focus is in the chat input.
@@ -85,7 +85,7 @@ lib/db/schema/screens.ts
 lib/dto.ts                         (ProjectDTO, MessageDTO, ScreenDTO, FileMetaDTO)
 app/api/projects/[projectId]/route.ts                  (PATCH title)
 app/api/projects/[projectId]/screens/[screenId]/route.ts (PATCH position)
-e2e/workspace.spec.ts
+tests/e2e/workspace.spec.ts
 ```
 
 ## Database changes
@@ -143,5 +143,5 @@ Finish with lint/typecheck/test (+ playwright) and summarize.
 - Don't render iframes inside a CSS-transformed canvas without testing pointer mapping. Scaling breaks hit-testing for some libraries. Phase 07 will mount iframes in the frame slot; check now that a plain `<iframe>` inside a scaled frame still receives clicks at the right coordinates.
 - Persisting positions on every mousemove floods the DB. Persist on drag end, debounced.
 - Long chats: virtualize the list (`@tanstack/react-virtual`) now. Agent runs produce many messages.
-- Keep `WorkspaceBootstrap` small. Never ship file **contents** in the initial payload; fetch by revision later (`05-ai-agent-design.md` §7).
+- Keep `WorkspaceBootstrap` small. Never ship file **contents** in the initial payload; fetch by revision later (`05-ai-agent-design.md` §8).
 - The video's layout is a starting point; the user can tweak it. Prioritise the canvas and preview sizes, since those are what users judge the product by.

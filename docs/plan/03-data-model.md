@@ -40,7 +40,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 | `current_plan_message_id` | text null fk → messages | the latest `plan_card` message (Phase 06) |
 | `plan` | jsonb null | **the current plan is the truth** (`05` §3.2): `AppPlan` + `themePackage {themes, activeThemeId}` (the **only** source of themes, §6) + `collections` + `components` (name, purpose) + `pendingChanges` + `backend` (public config only). Platform files are rendered from it (`06` §10). Every write emits `plan.updated`. |
 | `slug` | text null | set once at first build/publish with a project-id suffix (Phase 15) |
-| `snack` | jsonb null | `{snackId, url, savedAt, snapshotId}` of the last persistent Snack save (Phase 11) |
+| `snack` | jsonb null | Path A only: `{snackId, url, savedAt, snapshotId}` of the last persistent Snack save (Phase 11) |
 | `bundle_id`, `android_package` | text null | iOS bundle identifier / Android package. Derived from slug, **locked after the first store build** (Phase 15) |
 | `eas_project_id` | text null | EAS project id on the **owner's** Expo account (Phase 15/16; builds and publish are owner-only, ADR-003 #3) |
 | `eas_webhook_id`, `eas_webhook_secret_enc` | text null | per-project EAS webhook and its secret (created after EAS init; ADR-003 #17) |
@@ -189,6 +189,10 @@ Unique (user_id, provider).
 
 ### `project_backends` (Phase 13)
 | `project_id` pk | `provider` | `mode` (`direct` = provider client + RLS with auth always deployed and anonymous sign-in · `gateway` = platform `/api/apps/[id]/…`) | `external_project_id` | `public_config` jsonb (URL + **publishable** key: safe to ship in the app) | `secret_config_enc` (secret/service keys and `db_pass`: never shipped) | `services` jsonb (`[{type, status}]`) | `schema_version` int | `status` (`connecting` · `provisioning` · `ready` · `failed` · `reconnect_required`) | `error` |
+
+### `device_sessions` (Phase 11, Path B)
+| `id` | `project_id` | `started_by` | `mode` (`devserver` \| `snack`) | `sandbox_instance` | `url` (exp:// URL shown as QR; unguessable) | `status` (`starting` · `ready` · `stopped` · `failed`) | `clients` jsonb (if the dev server reports them) | `last_activity_at` | `error` |
+One live session per project; idle-stopped after 15 minutes without a connected client (`08` §5).
 
 ### `project_github_repos` (Phase 14)
 | `project_id` pk | `owner` | `repo` | `default_branch` | `last_pushed_snapshot_id` | `last_commit_sha` |

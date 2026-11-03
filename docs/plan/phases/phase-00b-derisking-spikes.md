@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | Video chapter(s) | New (not in video) |
-| Branch | `spike/00b-<name>` per spike. Spike code lives in `spikes/` and is **never merged into app code**; findings and reusable assets (fixture app, prompt drafts) are merged |
+| Branch | `spike/00b-<name>` per spike. Most spike code lives in `spikes/` and is **never merged into app code**. Exceptions (ADR-003 #10): **S1's runtime code graduates into `preview-runtime/`** (Phase 07 hardens and tests it), and the fixture app and prompt drafts are kept |
 | Depends on | Phase 00 |
-| Effort (solo dev + Claude Code) | ~7 days total (the Phase 07 runtime spike moves here, so Phase 07 shrinks by ~3 days) |
+| Effort (solo dev + Claude Code) | ~7.5 days total (the Phase 07 runtime spike moves here, so Phase 07 shrinks by ~3 days; S3 grew to 1 day for the hosted dev-server path, ADR-002) |
 | New env vars | none (spikes use local `.env.spike`) |
 
 ## Goal
@@ -22,42 +22,53 @@ Turn every 🟡/🔴 assumption in `14-confidence-gates.md` §1 into a measured 
 - Record results in `12` (D7, Q1–Q5) and `14` §1.
 - **Pass:** every fact has a source link and date. **Fail →** update the affected phase docs before G0.
 
-### S1. Preview runtime (3 days), `spikes/preview-runtime/`
+### S1. Preview runtime (3 days), built directly in `preview-runtime/` (graduates)
 Exactly `07-preview-runtime.md` §9:
-1. Hand-write the fixture app `preview-runtime/fixtures/habit-tracker/` following `06` (plan.json, 4 screens incl. sign-in + one stack screen, 4 components, 2 collections). **This fixture is kept** and reused by Phases 07–11 and tests.
+1. Hand-write **the** fixture app `preview-runtime/fixtures/habit-tracker/` following `06`: `plan.json`, **4 screens = `sign-in` + 2 tab screens (`today`, `habits`) + 1 stack detail screen (`habit-detail`)**, 4 components, 2 collections (`habits`, `checkins`). This is the only fixture definition. It's kept and reused by Phases 07–11, tests and evals.
 2. Vendor bundle + CommonJS loader + expo-router shim → interactive iframe.
 3. Frame mode with `initialRoute`; 4 frames on a page.
 4. Hot swap from a textarea edit in < 300 ms.
 5. Babel `afid` stamps (`line:col`) + click-to-select prints source location; `edit.override` restyles one element without restart.
 6. CSS-variable theme switch across all frames.
-- **Pass:** 1–6 work in Chrome and Safari; 8 frames stay usable. **Fallback:** `file:line:type` stamps (A7); Sandpack for the loader (A1).
+- Also check that Ionicons render under the production CSP (`font-src` per ADR-003 #15) inside a sandboxed frame.
+- **Pass:** 1–6 work in Chrome and Safari; 8 frames stay usable; icons render. **Fallback:** `file:line:type` stamps (A7); Sandpack for the loader (A1).
 
 ### S2. Generator quality and cost (1.5 days), `spikes/generators/`
 - Draft the Planner, Foundation, Component Designer and Screen Builder prompts from `05` §3 and §5, in our own words. **The drafts are kept** and become Phase 06/08 prompts.
 - Script: for 5 prompts from `10` §2.1, run plan → foundation → components → screens with structured outputs, writing into the fixture template. Validate and repair once, then render each screen in the S1 harness.
+- **Allowed stubs** (ADR-003 #10): hand-write the theme/schema/seed/layout renderers as minimal scripts (Phase 07/08 build the real ones), and validate with **syntax + import allowlist only** (no typecheck-lite yet). Use the S1 runtime as the render harness and a local static server for it.
+- Also measure **wall-clock p50/p90 per app**, sequentially and with concurrency 2 after screen 1. That sets Phase 08's build-time target (ADR-003 #11).
 - Measure the compile/render pass rate, repairs needed, cost per app (`ai_usage`-style accounting), wall-clock time, and `cache_read_input_tokens` on screens 2+.
 - Send one Planner call with project state as a mid-conversation system message (A6).
 - Run the same 5 prompts with `AI_BUILDER_MODEL=claude-sonnet-5-5` for D9 data.
 - **Pass:** ≥ 4/5 apps render every screen after ≤ 1 repair per file; cache hits > 0; cost per app within 2× of `11` §2. **Fallback:** time-boxed prompt iteration (1 extra day), then record an ADR with the chosen mitigation (A4).
 
-### S3. Snack on real phones (0.5 day)
-- Materialize the fixture to the `snack` target (`06` §10): relative imports, `App.js`, React Navigation shim. Open via QR in Expo Go on one iPhone and one Android phone. Push one file edit and confirm the reload without rescanning.
-- **Pass:** loads on both; the edit shows in < 5 s; tabs look native. **Fallback:** web fallback link; record the SDK situation (A2, A3).
+### S3. Real phones with store Expo Go (SDK 58) (1 day)
+The published `snack-sdk` stops at SDK 54 and store Expo Go runs only 58 (`15` §1), so test the default path first:
+- **Path B: hosted Expo dev server (default).** Materialize the fixture (SDK 58 template) into a temp dir with cached `node_modules`, then run `expo start` and get store Expo Go on one iPhone and one Android phone to load it over the internet. Try both connection mechanisms and record which works:
+  (a) `expo start --tunnel`;
+  (b) our own reverse proxy per session (`https://p-<id>.preview.<domain>` → Metro) with `EXPO_PACKAGER_PROXY_URL` set, so the manifest's bundle URLs point at the proxy (check whether Expo Go accepts the `exps://` / https form).
+  Edit a file in the session dir and confirm Fast Refresh updates the phones without rescanning. Measure Metro memory per session and cold-start time.
+- **Path A: Snack.** Only if a **published** `snack-sdk` lists SDK 58 on the day of the spike: materialize to the `snack` target (`06` §10) and repeat the phone test.
+- **Path C: web fallback.** Open the web preview URL in the phone's browser and confirm it renders and navigates.
+- **Pass:** Path B (or A) loads on both phones, an edit shows in < 5 s, and tabs look native; Path C works. **Fallback:** ship Path C first and record an ADR (A2, A3).
 
 ### S4. EAS Android build (+ iOS if an Apple account is available) (1 day)
-- With a test Expo account: materialize to `eas`, `git init` + commit in the temp dir, then build non-interactively with the chosen keystore approach (Phase 15 options). Receive the webhook (temporary tunnel is fine here) and verify the signature.
-- **Pass:** the APK installs and runs on a device; the webhook verifies. **Fallback:** poll-on-view (A12); `keytool` keystore (A10).
+- With a test Expo account: materialize to `eas` (SDK 58, `appVersionSource: "remote"`, `owner` set in app.json), then `EAS_NO_VCS=1 eas build --platform android --profile preview --non-interactive --no-wait --json` with `EXPO_TOKEN`. **Let EAS generate the keystore** (`15` §2), and confirm a second build reuses it. Create a **per-project** webhook (`eas webhook:create --event BUILD`, a per-project secret ≥ 16 chars; a temporary tunnel is fine here) and verify `expo-signature` (HMAC-SHA1, `sha1=<hex>`). Then re-fetch the build by id with the token (payloads are hints, ADR-003 #17).
+- iOS (optional): with an Apple account, confirm that a missing distribution certificate fails non-interactively, and that it works after creating the cert once plus the ASC API key env vars.
+- **Pass:** the APK installs and runs on a device; the webhook verifies; the re-fetch matches. **Fallback:** poll-on-view (A12); `keytool` keystore + local credentials (A10).
 
 ### S5. EAS Hosting (0.25 day)
-- `expo export -p web` (with `web.output: "single"`) + `eas deploy --prod` non-interactively; republish keeps the URL.
+- `npx expo export --platform web` (with `web.output: "single"` set explicitly; SDK 58 defaults to `server`) + `eas deploy --prod --dev-domain <slug> --non-interactive --json`; republish keeps the URL.
 - **Pass:** URL stable across two publishes. **Fallback:** static hosting (A13).
 
 ### S6. Backend provider (1 day)
-- With the D10 provider: OAuth connect a test account → create project → apply DDL derived from the fixture's collections → read/write from the fixture app in the browser and on a phone, with two users seeing only their own private records and the same shared records.
+- With the D10 provider: OAuth connect a test account → create project (store `db_pass` encrypted) → apply DDL derived from the fixture's collections → read/write from the fixture app in the browser and on a phone, with two users seeing only their own private records and the same shared records.
+- **Direct + RLS mode:** also test an app **without** sign-in screens. It must still get auth deployed and use anonymous sign-in (`owner_id = auth.uid()`). Confirm that one install can't read another install's private rows with the publishable key (ADR-003 #19). Use publishable keys in the app, never secret ones.
 - **Pass:** all of the above. **Fallback:** gateway mode; or switch provider (A15).
 
 ### S7. ImageKit (0.25 day)
-- Generate 3 images via URL; measure first-request latency and the "processing" behaviour; await-and-copy into storage; check cost in the dashboard.
+- Generate 3 images via URL. Measure first-request latency; detect the intermediate response (`is-intermediate-response: true` header, 200 HTML "being prepared") and poll until the real image arrives; await-and-copy into storage. Confirm that changing the prompt on the **same path** returns the cached image (so we vary the filename), and check unit usage (≈ 65 units per text-to-image) in the dashboard.
 - **Pass:** the server can await completion within 60 s per image. **Fallback:** placeholders (A14).
 
 ### G0 review (0.25 day)
@@ -67,8 +78,9 @@ Exactly `07-preview-runtime.md` §9:
 ## Files to create / change
 ```
 spikes/                         (throwaway; excluded from build, lint and CI except its own scripts)
-  preview-runtime/  generators/  snack/  eas/  backend/  imagekit/
-preview-runtime/fixtures/habit-tracker/   (kept)
+  generators/  devserver/  snack/  eas/  backend/  imagekit/
+preview-runtime/                          (S1 code, kept: graduates into Phase 07)
+preview-runtime/fixtures/habit-tracker/   (kept: the single fixture)
 lib/ai/prompts/drafts/                    (kept: prompt drafts from S2)
 docs/plan/12-…, 14-…, 11-…               (updated with results)
 ```
@@ -81,13 +93,13 @@ None.
 
 ## Acceptance checklist
 - [ ] S0 facts recorded with sources and dates in `12`/`14`.
-- [ ] S1 pass criteria met (screen recording attached).
-- [ ] S2 report: pass rate, repairs, cost per app (Opus and Sonnet), cache hit ratio, latency.
-- [ ] S3 recording on iPhone and Android.
-- [ ] S4 APK installed; webhook signature verified.
+- [ ] S1 pass criteria met (screen recording attached), including icons under the production CSP.
+- [ ] S2 report: pass rate, repairs, cost per app (Opus and Sonnet), cache hit ratio, wall-clock p50/p90 (sequential and concurrency 2).
+- [ ] S3: recording on iPhone and Android with store Expo Go via Path B (or A), the chosen connection mechanism recorded, and Path C verified.
+- [ ] S4: APK installed with an EAS-generated keystore under `EAS_NO_VCS=1`; per-project webhook signature verified; build re-fetched.
 - [ ] S5 stable URL across two publishes.
-- [ ] S6 two-user privacy check passes.
-- [ ] S7 latency and cost measured.
+- [ ] S6 two-user privacy check passes, including the anonymous-sign-in case without sign-in screens.
+- [ ] S7 latency, intermediate-response handling, cache-by-path behaviour and unit cost measured.
 - [ ] No spike credentials committed (`.env.spike` gitignored; tokens revoked after).
 - [ ] G0 ADRs written; no assumption a phase depends on is still 🔴.
 
@@ -97,7 +109,8 @@ Read docs/plan/14-confidence-gates.md, docs/plan/phases/phase-00b-derisking-spik
 docs/plan/06-generated-app-template.md and docs/plan/07-preview-runtime.md.
 
 We're doing spike S<N> only: <name>. This is throwaway code under spikes/<name>/ except
-for the assets the phase doc says to keep. Optimize for learning fast, not code quality,
+for what the phase doc says to keep (S1 code in preview-runtime/, the fixture, prompt drafts).
+Use the vendor facts in docs/plan/15-vendor-facts.md and re-check them against today's docs. Optimize for learning fast, not code quality,
 but never commit credentials (use .env.spike, which must be gitignored).
 
 1. Restate the spike's pass criteria and fallback from the phase doc.

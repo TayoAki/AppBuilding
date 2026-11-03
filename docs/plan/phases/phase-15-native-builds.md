@@ -4,129 +4,125 @@
 |---|---|
 | Video chapter(s) | Ch.17 "Build Android & iOS App Files" (02:23:32) |
 | Branch | `feat/15-native-builds` |
-| Depends on | Phase 05 (jobs), Phase 08 (materialize), Phase 14 (encrypted connections pattern) |
-| Effort (solo dev + Claude Code) | ~5–7 days (Android ~3, iOS ~2–4 depending on Apple account access) |
-| New env vars | `EAS_WEBHOOK_SECRET` |
+| Depends on | Phase 16 (Expo connect, EAS project init, identity: built there for the MVP and reused here), Phase 08 (materialize), Phase 14 (secret scanner), sandbox service (Phase 08) |
+| Effort (solo dev + Claude Code) | ~4–6 days (Android ~2–3, iOS ~2–3 depending on Apple account access). Expo connect, EAS init and identity moved to Phase 16 (ADR-003 #8) |
+| New env vars | none (per-user Expo tokens and per-project webhook secrets live encrypted in the DB; the global `EAS_WEBHOOK_SECRET` is dropped, ADR-003 #17) |
 
 ## Goal
-From **Publish → App Store**, a user picks an artifact (Android **APK** for testing, Android **AAB** for Google Play, iOS **IPA** for App Store/TestFlight). The platform starts an **EAS Build** on the user's own Expo account and shows live status. When the build finishes, the user downloads the file. Signing credentials are created and stored safely, so later builds can update the same store listing.
+From **Publish → App Store**, the **project owner** picks an artifact: Android **APK** for testing, Android **AAB** for Google Play, or iOS **IPA** for App Store/TestFlight. The platform starts an **EAS Build** on the owner's Expo account and shows live status. When the build finishes, the owner downloads the file. Signing credentials are created once and reused, so later builds can update the same store listing.
 
 ## What we do differently from the video (and why)
-- **EAS Build from the start, not GitHub Actions.** The video first tried GitHub Actions. Workflows can only be dispatched from a repo's default branch; it needed either a central builder repo or a workflow file in every user repo; macOS runners are needed for iOS; and keystores in CI are fiddly. It failed and switched to Expo's build service. EAS already handles Android/iOS toolchains, signing, artifact hosting and build webhooks for Expo projects, so we skip the detour.
-- **The Android keystore is created before the first build.** Non-interactive EAS builds won't create a new keystore (the video and the reference app both hit this). There are two ways to do it (step 4). We recommend letting **EAS generate and hold it** if the pinned `eas-cli`/API can do that non-interactively, and generating it ourselves with `keytool` otherwise. Either way, an app that has a keystore is never given a new one.
-- **The user's Expo account, the user's token.** The user pastes an Expo personal access token once. It's stored encrypted as `oauth_connections(provider = "expo")`. Builds count against **their** EAS quota. No platform-wide Expo token exists, so one leaked token can't touch every user's builds.
-- **Honest iOS story.** IPA builds need a paid Apple Developer account and signing credentials. We support the App Store Connect API key path and say up front that iOS needs more setup. The video glosses over this.
-- **Reference app notes** (`13-reference-implementation.md`):
-  - **R18:** identity (slug, `android.package`, `ios.bundleIdentifier`) is set **once** at the first build with a project-id suffix, because names change and repeat. Export and push use it too, along with `eas.json`. `appVersionSource: remote` lets EAS own `versionCode`/`buildNumber`.
-  - The uploaded project **must be a git repo**, or EAS prompts "Would you like us to run git init…" and fails non-interactively ("stdin is not readable"). We `git init` and commit inside the temp dir (step 6).
-  - iOS: if EAS has no Apple credentials for the bundle id, the dialog shows **setup steps instead of starting a build**.
-  - The reference app dispatches **EAS workflows** through the undocumented GraphQL API behind `eas workflow:run` (uploading a tarball, no git ref), and **polls build status only when someone opens the dialog** (no webhook). We prefer the documented `eas-cli` in our worker plus EAS webhooks, with polling as a fallback, so builds progress with the tab closed and nothing depends on an undocumented API (`13` §3). If `eas-cli` can't do something non-interactively, isolate any GraphQL fallback in `lib/providers/build/eas.ts`, as the reference app does in `lib/publish/expo.ts`.
-- **Builds treat project code as untrusted.** The materialized project runs through `eas-cli` in an **ephemeral container/temp dir** with only the user's Expo token in env, no platform secrets, and no install scripts (`npm ci --ignore-scripts` if dependencies are needed at all). The actual compilation happens on Expo's servers.
+- **EAS Build from the start, not GitHub Actions.** The video first tried GitHub Actions, which needs a default-branch workflow per repo, macOS runners for iOS and fiddly keystores in CI, and then switched to Expo. We skip the detour.
+- **Owner-only, owner's Expo account** (ADR-003 #3). One `projects.eas_project_id` lives on the owner's account, and editors can't start builds. The `08` §2 matrix is authoritative.
+- **Verified non-interactive facts** (`15-vendor-facts.md` §2–§3, eas-cli 27.3.0):
+  - EAS **generates an Android keystore in `--non-interactive` builds** when none exists.
+  - **`EAS_NO_VCS=1`** uploads without git, instead of `git init`.
+  - iOS needs a **distribution certificate that already exists**; a missing one fails with `MissingCredentialsNonInteractiveError`.
+  - Webhooks are **per EAS project**, signed with **HMAC-SHA1** in `expo-signature: sha1=<hex>`.
+- **Webhook payloads are hints.** Each project has its own encrypted webhook secret. Every payload triggers a **re-fetch of the build with the owner's token** before anything is written, so a leaked or forged payload can't inject an artifact URL.
+- **Untrusted project code runs in the sandbox service** (ADR-003 #18). `eas-cli` reads the materialized project there, with the owner's `EXPO_TOKEN` passed per job, used only for the command's lifetime and never stored in the sandbox. Compilation happens on Expo's servers.
+
+### Reference app notes
+- **R18:** identity (slug, `android.package`, `ios.bundleIdentifier`) is set **once** with a project-id suffix; `appVersionSource: remote`. Both now live in Phase 16 for the MVP and are reused here.
+- **R18:** "EAS requires a git repository… stdin is not readable." The reference app hit this. We set `EAS_NO_VCS=1` (verified), so there's no `git init`.
+- **R18:** if EAS has no Apple credentials for the bundle id, the dialog shows **setup steps instead of starting a build**. Kept, and narrowed by the verified fact that it's specifically the distribution certificate.
+- The reference app's `ensureAndroidKeystore` had Expo generate the keystore. Verified: non-interactive builds do this themselves.
+- The reference app dispatched EAS workflows through an **undocumented GraphQL API** and **polled only while the dialog was open**. We use the documented `eas-cli` + per-project webhooks + a polling fallback (`13` §3), so builds progress with the tab closed.
 
 ## Steps
 
-### 1. Expo token connect
-- Settings / Publish dialog: "Connect Expo" → instructions (expo.dev → Account settings → Access tokens → create) → paste token.
-- `POST /api/expo/token` → validate by calling the Expo account API (`eas whoami` equivalent) in the worker → store encrypted in `oauth_connections` with `external_login` = Expo username.
-- Show the connected account + "Disconnect".
+### 1. Prerequisites from Phase 16 (already built for the MVP) + the webhook
+- Expo token connect (`oauth_connections.provider = "expo"`, owner's token, validated, encrypted).
+- `ensureEasProject(projectId)`: links or creates the EAS project non-interactively under the owner's account. `app.json` carries `owner` (required for robot tokens) and `extra.eas.projectId`.
+- **New in this phase:** `ensureEasWebhook(projectId)`, run once per EAS project before its first build. The sandbox runs `eas webhook:create --event BUILD --url <APP>/api/webhooks/eas/<projectId> --secret <random ≥ 32 chars>` (≥ 16 required) with the owner's token, and the secret is stored encrypted in `projects.eas_webhook_secret_enc` (plus `eas_webhook_id`).
+- Identity set once: `projects.slug`, `android_package`, `bundle_id`, editable until the first store build and then locked.
 
-### 2. EAS project linking
-- On the first build for a project, the worker runs the EAS project init non-interactively under the user's account (e.g. `eas init --non-interactive --force` / `eas project:init`; **verify flags for the installed `eas-cli` version**). Store the resulting EAS project id in `projects.eas_project_id` and render it into `app.json` (`extra.eas.projectId`) at materialization.
-- **Identity, set once:** on the first build or web publish, compute `projects.slug` = `<kebab app name>-<6 chars of project id>` (e.g. `pennywise-k3x9qa`), `android_package` = `com.<expoUsername>.<slug without dashes>`, and `bundle_id` = the same. Show them in the dialog so the user can edit them **before** the first build. After it they're **locked**, because changing them breaks store updates. `materialize({ target: "eas" | "export" | "web" })` reads them (`06` §10), so zip/GitHub exports carry the same ids.
-
-### 3. `app.json` + `eas.json` generation
-Platform-owned templates (see `06-generated-app-template.md` §3, §10):
+### 2. `eas.json` (platform-rendered)
 ```jsonc
-// eas.json (rendered)
 {
   "cli": { "appVersionSource": "remote" },
   "build": {
-    "preview":    { "android": { "buildType": "apk", "credentialsSource": "local" }, "distribution": "internal" },
-    "production": { "android": { "buildType": "app-bundle", "credentialsSource": "local" },
-                    "ios": { "credentialsSource": "remote" }, "autoIncrement": true }
+    "preview":    { "android": { "buildType": "apk" }, "distribution": "internal" },
+    "production": { "android": { "buildType": "app-bundle" }, "autoIncrement": true }
   }
 }
 ```
-- `appVersionSource: "remote"` + `autoIncrement` lets EAS manage `versionCode`/`buildNumber`. The user-facing `version` (e.g. `1.0.0`) is editable in the dialog. This is the "automatically detects the version number" behaviour from the video.
-- No `app.config.js` ever: static JSON only, so the CLI doesn't execute project-provided JS when reading config.
+- `appVersionSource: "remote"` + `autoIncrement` lets EAS own `versionCode`/`buildNumber`. The user-facing `version` (e.g. `1.0.0`) is editable in the dialog.
+- Static `app.json` only (no `app.config.js`), so the CLI never executes project-provided config code.
 
-### 4. Android keystore (`ensureAndroidKeystore`, once per project)
-Pick one option during implementation, after checking the pinned `eas-cli` docs.
-
-| | **A. EAS-managed (recommended if available)** | **B. We generate it** |
+### 3. Android signing (`ensureAndroidKeystore`)
+| | **A. EAS-generated (recommended, verified)** | **B. We generate it (fallback)** |
 |---|---|---|
-| How | Have EAS generate a keystore and register it as the app's **remote** Android credentials before the first build. The reference app's `ensureAndroidKeystore` does this. Check first whether a documented non-interactive path exists (credentials commands/API); otherwise isolate the call. | `keytool -genkeypair -v -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias <alias> …` with random passwords; pass it via `credentials.json` + `credentialsSource: "local"` |
-| `eas.json` | `android.credentialsSource: "remote"` | `android.credentialsSource: "local"` |
+| How | Credentials stay `remote`. On the first non-interactive build, EAS generates the keystore itself (`generateRandomKeystoreAsync`). | `keytool -genkeypair -v -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 …`, passed via `credentials.json` + `credentialsSource: "local"` |
+| When to use | Default | Only if S4 shows A failing for the pinned eas-cli |
 | Secrets we hold | none | keystore + passwords (encrypted `project_signing`, separate backup) |
-| Portability | user downloads it from expo.dev | "Download signing key" (owner + re-auth, audit-logged) |
-| Risk | depends on an EAS path that may be undocumented | key loss is on us, so backups are mandatory (Phase 19) |
+| Portability | owner downloads it from expo.dev | "Download signing key" (owner + re-auth, audit-logged) |
 
-Rules for both: check for an existing keystore first and **never replace one**. Record which option a project uses (`project_signing.android_keystore_enc` null ⇒ remote). For option B, write `credentials.json` + `.jks` only into the temp dir and delete it afterwards.
+Rule for both: never replace an existing keystore. After the first build, record the keystore's SHA-1 fingerprint (from `eas credentials` JSON or the build metadata) in `project_signing.android_fingerprint`, and fail loudly if a later build reports a different one.
 
-### 5. iOS credentials
-- Needs: Apple Developer Program membership, team id, and an **App Store Connect API key** (`.p8`, key id, issuer id) that EAS uses to manage certificates/profiles non-interactively. **Verify current EAS docs** for the exact env vars/flags.
-- Store the key encrypted (add `ios_asc_key_enc`, `ios_asc_key_id`, `ios_asc_issuer_id`, `apple_team_id` to `project_signing`, or per-user if shared across projects).
-- Before an iOS build, check whether EAS already has distribution credentials for `bundle_id`, or we hold an ASC key. If neither, the dialog shows **setup steps instead of starting a build** (enroll in Apple Developer Program → create an ASC API key → paste it here, *or* run `eas credentials` once locally). The IPA option stays disabled until this is resolved. Internal-distribution IPAs also need registered device UDIDs. Document this rather than hide it.
+### 4. iOS credentials
+- Needs Apple Developer Program membership and an **App Store Connect API key** (`.p8`, key id, issuer id), stored encrypted in `project_signing` (`ios_asc_key_enc`, `ios_asc_key_id`, `ios_asc_issuer_id`, `apple_team_id`, `apple_team_type`).
+- For the build, write the key to a temp file in the sandbox and set `EXPO_ASC_API_KEY_PATH`, `EXPO_ASC_KEY_ID`, `EXPO_ASC_ISSUER_ID` (omit for individual keys), `EXPO_APPLE_TEAM_ID`, `EXPO_APPLE_TEAM_TYPE` (`INDIVIDUAL` / `COMPANY_OR_ORGANIZATION` / `IN_HOUSE`). With these, EAS creates or repairs **provisioning profiles** non-interactively.
+- The **distribution certificate isn't created non-interactively.** Before allowing IPA, check whether EAS has one for the team (`eas credentials` JSON / build dry check). If not, the dialog shows **setup steps instead of starting a build**: run `eas credentials -p ios` once on their machine (we show the exact command with their project id), or upload an existing `.p12` + password via expo.dev. The IPA option stays disabled until it's resolved.
+- Internal-distribution IPAs also need registered device UDIDs. Document this rather than hide it.
 
-### 6. Build job `build.native`
+### 5. Build job `build.native` (single-shot wrapper; the run ends at submit)
 Worker `worker/handlers/build-native.ts`:
-1. Gate: `gate.canNativeBuild(user)` (stub returns true; Phase 18 makes it Pro-only).
-2. `materialize({ target: "eas" })` of the current snapshot into `mkdtemp()` (static `app.json` with identity + `extra.eas.projectId`, `package.json` from `bundledNativeModules.json`); secret scan (Phase 14).
-3. Write `eas.json` and signing files (option B only).
-3b. **Make it a git repo:** `git init -q && git add -A && git -c user.name=AppBuilding -c user.email=builds@<domain> commit -qm "Build <version>"`. Without it EAS prompts for `git init` and fails non-interactively. (Check whether the pinned `eas-cli` supports a no-VCS mode such as `EAS_NO_VCS=1`; a committed repo works either way.)
-4. Run `eas build --platform <android|ios> --profile <preview|production> --non-interactive --no-wait --json` with `EXPO_TOKEN=<user token>` as the **only** secret in the child env (verify flags against the pinned `eas-cli`).
-5. Parse the JSON for the EAS build id → insert/update `native_builds` (`status = 'queued'`, `eas_build_id`, `logs_url`).
-6. Clean up the temp dir.
+1. Gate: owner check + `gate.canNativeBuild(owner)` (Pro only from Phase 18).
+2. `materialize({ target: "eas" })` of the current snapshot → tarball in storage (signed URL), with a secret scan (Phase 14).
+3. Sandbox `POST /jobs/eas-build` (HMAC per-job token) with `{tarballUrl, platform, profile, expoToken, ascKey?}`. The sandbox unpacks to a temp dir and runs:
+   `EAS_NO_VCS=1 EXPO_TOKEN=… eas build --platform <android|ios> --profile <preview|production> --non-interactive --no-wait --json`
+   with an explicit env allowlist (PATH, HOME, `EAS_NO_VCS`, `EXPO_TOKEN`, iOS ASC vars). It returns the parsed build id, then deletes the temp dir and key files.
+4. Insert `native_builds` (`status = queued`, `eas_build_id`, `logs_url`). **The run succeeds here** (`runs.output = {buildId}`); build progress lives in `native_builds`, not in the run (ADR-003 #2, #17).
 
-### 7. Status updates: webhook + polling fallback
-- EAS webhooks are configured **per Expo account**. On Expo connect, the worker creates a BUILD webhook on the user's account pointing at `/api/webhooks/eas` with secret `EAS_WEBHOOK_SECRET` (`eas webhook:create …`, non-interactive; verify flags).
-- `POST /api/webhooks/eas`: verify the HMAC signature header over the **raw body** (see EAS docs for header name/algorithm), look up `native_builds` by `eas_build_id`, update `status` / `artifact_url` / `error`, append a `run_events` row so open workspaces update.
-- Fallback: a pg-boss scheduled job polls active builds (`eas build:view <id> --json`) every 60 s, for when webhook creation failed or events were missed.
+### 6. Status updates: per-project webhook + polling fallback
+- `POST /api/webhooks/eas/:projectId`:
+  - verify `expo-signature` = `sha1=` + HMAC-SHA1(raw body, project's secret), with a constant-time compare (401 on mismatch);
+  - dedupe through `processed_webhook_events(provider='eas', event_id = payload.id + status)`;
+  - **re-fetch** the build with the owner's token (`eas build:view <id> --json` via the sandbox, or the EAS API), and only then update `native_builds` (`status` building/finished/errored/canceled, `artifact_url` from the re-fetched `artifacts.buildUrl`, `error`);
+  - emit `build.status` on the project-scoped stream;
+  - return 2xx fast (EAS retries non-2xx with back-off).
+- Fallback: a pg-boss scheduled job polls active builds every 60 s (re-fetch only), for missed webhooks.
 
-### 8. Publish dialog → App Store tab
-- Choices: Android APK (testing), Android AAB (Play Store), iOS IPA (App Store). Version field; bundle id/package (locked after first build).
-- Build history list: platform, version, status chip, started/finished, **Download** (artifact URL), **Logs**.
-- Builds continue when the dialog is closed; the header shows "Building Android…".
+### 7. Publish dialog → App Store tab
+- Choices: Android APK (testing), Android AAB (Play Store), iOS IPA (App Store). Version field; package and bundle id (locked after the first store build).
+- Build history: platform, version, status chip, started/finished, **Download** (artifact URL), **Logs**.
+- Builds continue when the dialog is closed; the header shows "Building Android…". Free-tier EAS queues are shown honestly ("Queued on Expo — free tier queues can take 10+ minutes").
 
 ## Files to create / change
-- `lib/providers/build/{types.ts,eas.ts,android-keystore.ts,ios-credentials.ts}`
-- `worker/handlers/{build-native.ts,eas-poll.ts,expo-connect.ts}`
-- `app/api/expo/token/route.ts`, `app/api/projects/[projectId]/builds/route.ts`, `app/api/webhooks/eas/route.ts`
-- `templates/expo-app/{app.json.hbs,eas.json.hbs}`
-- `lib/vfs/materialize.ts` (signing files excluded from exports; `extra.eas.projectId`)
-- `lib/credits/gate.ts` (`canNativeBuild` stub)
-- `components/workspace/publish/{PublishDialog.tsx,AppStoreTab.tsx,BuildHistory.tsx,ConnectExpo.tsx}`
-- Worker Docker image: Node 22 + `eas-cli` (pinned) + JDK (for `keytool`)
+- `lib/providers/build/{types.ts,eas.ts,ios-credentials.ts,android-signing.ts}` (+ `README.md` with the verified facts)
+- `worker/handlers/{build-native.ts,eas-poll.ts}`
+- `sandbox/jobs/eas-build.ts`, `sandbox/jobs/eas-view.ts`
+- `app/api/projects/[projectId]/builds/route.ts`, `app/api/webhooks/eas/[projectId]/route.ts`
+- `templates/expo-app/eas.json.hbs`
+- `lib/credits/gate.ts` (`canNativeBuild`)
+- `components/workspace/publish/{AppStoreTab.tsx,BuildHistory.tsx,IosSetupSteps.tsx}`
+- Sandbox image: Node 22 + pinned `eas-cli` (+ JDK only if option B is used)
 
 ## Database changes
-- `oauth_connections`: rows with `provider = 'expo'`.
-- `native_builds`: `id`, `project_id`, `platform`, `artifact`, `version`, `build_number`, `eas_build_id`, `status`, `artifact_url`, `logs_url`, `error`.
-- `project_signing`: Android keystore fields; add iOS ASC key fields (see Step 5).
-- Uses `projects.slug`, `projects.bundle_id`, `projects.android_package` (set once, then locked) and `projects.eas_project_id` (all in `03-data-model.md` §2).
-- New `runs.kind` value in use: `build_native`.
+- `native_builds`: `id`, `project_id`, `platform`, `artifact`, `version`, `build_number`, `eas_build_id`, `status` (`queued` · `building` · `finished` · `errored` · `canceled`), `artifact_url`, `logs_url`, `error`, `requested_by`.
+- `project_signing`: Android option-B fields; `android_fingerprint`; iOS ASC fields + `apple_team_type`.
+- `projects.eas_webhook_id`, `projects.eas_webhook_secret_enc` (created by `ensureEasWebhook` in this phase). **Add to `03`.**
+- `processed_webhook_events` (ADR-003 #6). `runs.kind = build_native`.
 
 ## API surface
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
-| POST | `/api/expo/token` | session | `{ token }` → `{ connected: true, username }` |
-| DELETE | `/api/expo/token` | session | → `{ ok }` |
 | GET | `/api/projects/:id/builds` | viewer | → `{ builds: NativeBuild[] }` (no credentials) |
-| POST | `/api/projects/:id/builds` | owner (or editor) + plan gate | `{ platform, artifact, version }` → `{ runId, buildId }` |
-| GET | `/api/projects/:id/signing/android` | owner + recent re-auth | → keystore download (audit-logged) |
-| POST | `/api/webhooks/eas` | HMAC signature | EAS payload → 200 |
+| POST | `/api/projects/:id/builds` | **owner** + plan gate | `{ platform, artifact, version }` → `{ runId }` |
+| POST | `/api/projects/:id/signing/ios` | owner | `{ ascKey(p8), keyId, issuerId?, teamId, teamType }` → `{ ok, distributionCertFound }` |
+| GET | `/api/projects/:id/signing/android` | owner + recent re-auth | → keystore download (option B; audit-logged) |
+| POST | `/api/webhooks/eas/:projectId` | per-project HMAC-SHA1 | EAS payload → 2xx |
 
 ## Acceptance checklist
-- [ ] Connecting an invalid Expo token shows an error; a valid one shows the username.
-- [ ] The first Android APK build sets the identity once (slug with project-id suffix; package/bundle id shown, editable, then locked), creates the EAS project, ensures exactly one keystore (option A or B), queues the build, and the status updates to finished with a working download link, **with the browser tab closed during the build**.
-- [ ] The uploaded/temp project is a git repo; a build never stalls on an EAS `git init` prompt.
-- [ ] A second build reuses the same keystore (same SHA-1 fingerprint) and auto-increments `versionCode`.
-- [ ] An AAB build succeeds with the same keystore.
-- [ ] Webhook with a bad signature → 401; a valid one updates `native_builds` and the open workspace.
-- [ ] With the webhook disabled, the polling fallback still completes the status.
-- [ ] The child process env for `eas build` contains only `EXPO_TOKEN` (+ PATH/HOME); test asserts no platform secrets are passed.
-- [ ] With no Apple credentials in EAS (and no ASC key), choosing IPA shows setup steps instead of starting a build.
-- [ ] Non-owner can't download signing keys; viewers can't start builds.
-- [ ] Temp dirs are deleted after success and failure.
+- [ ] The first Android APK build on a fresh test Expo account succeeds non-interactively (EAS generates the keystore), and status updates to finished with a working download link, **with the browser tab closed**.
+- [ ] The build upload never prompts for git (`EAS_NO_VCS=1`); no `git init` code exists.
+- [ ] A second build has the same keystore fingerprint and an auto-incremented `versionCode`. An AAB build succeeds with the same keystore.
+- [ ] Webhook: a bad signature → 401. A valid signature with a forged `artifacts.buildUrl` is ignored, because the artifact URL comes only from the re-fetch. A duplicate delivery is a no-op.
+- [ ] With the webhook disabled, the polling fallback completes the status.
+- [ ] The sandbox child env contains only the allowlisted vars; a test asserts no platform secrets are passed. Temp dirs and key files are deleted after success and failure.
+- [ ] With no distribution certificate on EAS, choosing IPA shows setup steps (with the exact `eas credentials -p ios` command) instead of starting a build. With one, the IPA build succeeds using the ASC key.
+- [ ] **AuthZ:** editors and viewers can't start builds (403); non-members get 404; only the owner can download signing keys.
 
 ## Claude Code prompt
 ```text
@@ -134,42 +130,36 @@ We're implementing Phase 15 (native builds via EAS Build) of AppBuilding.
 
 Read first:
 - docs/plan/phases/phase-15-native-builds.md (scope + acceptance checklist)
-- docs/plan/06-generated-app-template.md §3 and §10 (platform-owned files, materialize)
-- docs/plan/03-data-model.md §7 (oauth_connections, native_builds, project_signing)
-- docs/plan/08-security.md (untrusted code, secrets, webhooks)
+- docs/plan/15-vendor-facts.md §2–§3 (verified eas-cli 27.3.0 facts) and ADR-002/ADR-003 (#2, #3, #17, #18)
+- docs/plan/phases/phase-16-web-publish.md (Expo connect, ensureEasProject, ensureEasWebhook, identity: reuse)
+- docs/plan/06-generated-app-template.md §10 (materialize "eas" target)
+- docs/plan/08-security.md (§2 matrix, §5 untrusted code, §9 webhooks)
 
-Before coding, check the installed/pinned eas-cli version's docs for: non-interactive project init,
-`eas build --non-interactive --no-wait --json`, credentials.json format with credentialsSource "local",
-appVersionSource "remote" + autoIncrement, `eas webhook:create`, webhook signature verification, and
-iOS App Store Connect API key env vars. Write what you verified into lib/providers/build/README.md.
+Re-check the pinned eas-cli's flags against these facts and note differences in
+lib/providers/build/README.md.
 
 Implement:
-1. Expo token connect (validate, encrypt, store as oauth_connections provider 'expo').
-2. Identity set once (projects.slug = name + project-id suffix, android_package, bundle_id; editable
-   before the first build, then locked) + eas.json template (appVersionSource remote, autoIncrement).
-3. ensureAndroidKeystore: prefer EAS-managed remote credentials if a non-interactive path exists in the
-   pinned eas-cli; otherwise keytool + credentials.json (local), encrypted in project_signing. Never replace
-   an existing keystore. Tell me which option you chose and why.
-4. build.native worker job: materialize({target:"eas"}) into mkdtemp, secret scan, write configs
-   (+ credentials for option B), git init + commit in the temp dir, run eas-cli with ONLY EXPO_TOKEN as
-   secret env, record native_builds, always clean up.
-5. EAS webhook route with signature verification + scheduled polling fallback.
-6. Publish dialog App Store tab + build history; iOS shows setup steps instead of building when EAS has
-   no Apple credentials for the bundle id. Status survives closing the tab.
-7. gate.canNativeBuild stub (real plan check comes in Phase 18).
-
-Definition of done = Acceptance checklist. Tests: webhook signature, child-env allowlist,
-keystore reuse, authz on every route. Use a fake BuildProvider in tests; never call EAS in CI.
-
-Do NOT build: web publish (Phase 16), billing (Phase 18), store submission (eas submit).
-Finish by running lint, typecheck, tests; summarize and list the manual steps (Expo token, Apple account).
+1. eas.json template (appVersionSource remote, autoIncrement, apk/app-bundle profiles).
+2. Android signing: option A (EAS generates the keystore in non-interactive builds) by default;
+   option B (keytool + credentials.json local) behind a flag; record the fingerprint; never replace.
+3. iOS: ASC key storage + env vars; detect a missing distribution certificate and show setup steps
+   instead of building.
+4. build.native (single-shot; the run ends at submit): materialize → tarball → sandbox job runs
+   `EAS_NO_VCS=1 eas build --non-interactive --no-wait --json` with an env allowlist → native_builds row.
+5. Per-project webhook route: HMAC-SHA1 `sha1=<hex>` over the raw body, dedupe via
+   processed_webhook_events, re-fetch the build with the owner's token before writing, emit
+   build.status; plus the 60 s polling fallback.
+6. App Store tab + build history; owner-only start.
+Tests: signature verification, forged-payload ignored, env allowlist, keystore fingerprint reuse,
+authz. Use a fake BuildProvider in tests; never call EAS in CI.
+Do NOT build: store submission (eas submit), billing (Phase 18 adds the Pro gate).
+Finish with lint, typecheck, tests; summarize, and list the manual steps (Apple account, test Expo account).
 ```
 
 ## Pitfalls & notes
-- **Keystore loss is permanent.** If you lose the Android upload key for an app published on Play (without Play App Signing), you can never update it. Encrypt it, back it up separately from the DB, and test restore. Encourage users to enroll in Play App Signing.
-- **Bundle id changes break updates.** Lock them after the first production build; changing them means a new store listing.
-- **EAS free-tier queues.** Free accounts can wait many minutes. The video saw a ~12.7 min queue on the web build. Set expectations in the UI ("Queued on Expo — free tier queues can take 10+ minutes") and keep showing status after the dialog closes.
-- **Snack/Expo Go vs native build fidelity.** Builds use the real expo-router and native tab bars. Small UI differences from the browser preview are expected (the video notes this on device).
-- **Child process hygiene.** Spawn with an explicit `env` object (not `process.env`), a timeout, and a max output size. Never log the token. Mask it in captured CLI output.
-- **Credential sources.** Android uses `remote` (option A) or `local` (option B); iOS uses `remote` (EAS-managed via the ASC key). Mixing these up per profile is a common failure. Keep the rendered `eas.json` in a snapshot test for both options.
-- **"Experience … does not exist" (EXPERIENCE_NOT_FOUND).** The reference app hit this when the EAS project didn't exist yet under the user's account. Always run project init (step 2) and store `eas_project_id` before the first build.
+- **Keystore loss is permanent** for apps on Play without Play App Signing. With option A, EAS holds it (the owner can download it from expo.dev). With option B, encrypt it, back it up separately from the DB, and test restore (Phase 19a). Encourage Play App Signing.
+- **Bundle id changes break updates.** Lock them after the first store build.
+- **Robot/personal tokens and `owner`.** Non-interactive linking needs `owner` in `app.json` when the token is a robot token or the account has several owners (`15` §2).
+- **EXPERIENCE_NOT_FOUND.** The reference app hit this when the EAS project didn't exist under the account yet. `ensureEasProject` (Phase 16) must run before the first build.
+- **Fidelity:** native builds use the real expo-router and native tab bars. Small differences from the browser preview are expected.
+- **Child process hygiene:** use an explicit `env` object (never `process.env`), a timeout and a max output size. Mask the token in captured output.

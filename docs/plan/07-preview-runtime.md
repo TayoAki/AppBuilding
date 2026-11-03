@@ -19,10 +19,10 @@ The canvas shows every screen of the generated app side by side in phone frames,
 
 ## 2. Approach
 
-**Run react-native-web inside sandboxed iframes, with an in-browser module loader.** Expo Snack is used only for real devices (Phase 11).
+**Run react-native-web inside sandboxed iframes, with an in-browser module loader.** Real devices are a separate concern (Phase 11: hosted Expo dev server by default, Snack only when it supports the template SDK).
 
 Alternatives considered:
-- *Snack web player for everything.* One session per app, slower cold start, tied to the Snack SDK list, and hard to instrument for element selection. Rejected for the canvas; kept for QR.
+- *Snack web player for everything.* One session per app, slower cold start, tied to the Snack SDK list, and hard to instrument for element selection. Rejected for the canvas.
 - *Server-side Metro/Expo web bundling per edit.* Seconds of latency per change and heavy infrastructure. Rejected.
 - *Sandpack (CodeSandbox) bundler.* Possible, but it doesn't understand expo-router and adds an external runtime dependency. It's a fallback if the custom loader spike fails.
 
@@ -31,8 +31,10 @@ Alternatives considered:
 ```
 preview-runtime/
   src/
-    vendor.ts          bundles react, react-dom, react-native-web, @expo/vector-icons (web),
-                       react-native-svg (web), safe-area-context, async-storage(web), date-fns, …
+    vendor.ts          bundles react, react-dom, react-native-web, @expo/vector-icons (web, Ionicons
+                       font as a bundled asset), react-native-safe-area-context, async-storage (web), and
+                       a web build of every module in 06 §4's allowlist, nothing else; the platform's
+                       remote backend client for `lib/backend` (Phase 13)
                        → exposes a module registry: window.__AB_MODULES__["react-native"] = …
     shims/
       expo-router.tsx  memory-history implementation of the subset the template uses:
@@ -102,7 +104,10 @@ Mapping `afid` → AST node on the server: re-parse the current revision and fin
 ## 6. Isolation and security
 
 - Iframes use `sandbox="allow-scripts"` **without** `allow-same-origin`. The result is an opaque origin: no cookies, no `localStorage` from the parent origin, no fetch with credentials to our API.
-- Load the runtime HTML via `srcdoc` (or from a separate preview domain). Set a CSP that allows only our vendor/runtime script URLs, `img-src` for the image provider + data/blob, and `connect-src` limited to the connected backend's URL once Phase 13 exists.
+- Load the runtime HTML via `srcdoc` (or from a separate preview domain). Set a CSP that allows only our vendor/runtime script URLs, `img-src` for the image provider, our storage and data/blob, **`font-src <runtime origin> data:`** (Ionicons ships as `@font-face`; without it icons render blank, ADR-003 #15), and `connect-src` limited to the connected backend's URL (or our gateway) once Phase 13 exists:
+  `default-src 'none'; script-src <runtime origin> 'unsafe-eval'; style-src 'unsafe-inline'; font-src <runtime origin> data:; img-src https: data: blob:; connect-src <backend or gateway URL>`
+- `html-to-image` frame snapshots must inline fonts and images (fetch them as data URLs first), or snapshots show missing icons.
+- Phase 07 acceptance includes a check that icons render under the **production CSP** in a sandboxed frame.
 - The runtime never receives platform tokens. Files are pushed in by the parent via `postMessage`; the runtime has no API access of its own.
 - Generated code that loops forever freezes only its own iframe. The parent shows a "frame not responding" overlay after a heartbeat timeout and offers reload.
 
@@ -115,14 +120,17 @@ Mapping `afid` → AST node on the server: re-parse the current revision and fin
 
 ## 8. Render smoke test (server side, Phase 08)
 
-The worker uses Playwright + Chromium to load `/preview-runtime/harness.html` with the project's files. It renders each route in turn and collects `runtime.error` messages. Their count goes into `validation.result`, and errors go back to the agent's fix stage. The same harness produces **thumbnails** for the projects grid (Phase 17).
+The **sandbox service** (no secrets, no DB access; `08` §5, ADR-003 #18) runs Playwright + Chromium. It serves the bundled `public/preview-runtime/` (built into the sandbox image, the same build as the web app's) from a local static server on `127.0.0.1`, and loads `harness.html` with the project's files, which the worker passes in as a signed storage URL. It renders each route in turn and collects `runtime.error` messages. Their count goes into `validation.result`, and errors go back to the agent's fix stage. The same harness produces **thumbnails** for the projects grid (Phase 17).
 
-## 9. Spike plan (first task of Phase 07)
+## 9. Spike plan (Phase 00b S1; the code graduates into `preview-runtime/`)
 
-1. Hand-write a fixture app in `preview-runtime/fixtures/habit-tracker/` that follows the template contract: 3 tab screens, 1 stack screen, a store, a theme pack.
+The spike runs as **S1 in Phase 00b** (ADR-003 #10). Its code is the first version of `preview-runtime/` (not throwaway); Phase 07 hardens and tests it.
+
+1. Hand-write the **one canonical fixture** `preview-runtime/fixtures/habit-tracker/` following the template contract: `plan.json` with **sign-in + 2 tab screens + 1 stack detail screen**, **4 components**, **2 collections**, 5 themes.
 2. Get it rendering in a single interactive iframe: vendor bundle, loader, router shim.
 3. Add frame mode with `initialRoute`, and 4 frames on a test page.
 4. Add hot swap: edit a file in a textarea → `file.update` → re-render under 300 ms.
-5. Add the inspector plugin and print `afid`s on click.
+5. Add the inspector plugin and print `afid`s on click; `edit.override` restyles one element without a restart.
+6. CSS-variable theme switch across all frames; icons render under the production CSP.
 
-**Exit criteria:** all five work in Chrome and Safari. If the router shim proves infeasible in about 3 days, fall back to Sandpack with a custom expo-router shim, or to the Snack web player for the interactive preview only.
+**Exit criteria:** all six work in Chrome and Safari; 8 frames stay usable. If the router shim proves infeasible in about 3 days, fall back to Sandpack with a custom expo-router shim (A1 in `14`).

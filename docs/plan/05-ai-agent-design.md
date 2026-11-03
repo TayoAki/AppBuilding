@@ -161,13 +161,19 @@ Collections, themes and components are **not** in the plan the Planner writes. T
 
 `request` is **all** the builder sees, so the Planner spells out the exact copy, what moves where, and what to keep.
 
+**Semantics (ADR-003 #13):**
+- At tool time, the server builds the **resulting plan** and runs plan-guard on it before accepting. Any screen whose `navigatesTo` includes a removed id must be in `editScreens`. Tabs stay within 3–5, or the change must switch `navigation` to `stack`. `firstScreenId` can be removed only if the same call replaces it. A violation returns a tool error, and the Planner retries.
+- On success, the target plan is applied to `projects.plan` immediately. Added screens get status `planned`, edited ones keep `ready` until their new code passes. PROJECT STATE and layouts then reflect the intent.
+- A new screen that fails generation after its repair round is marked `error`. It shows on the canvas with **Retry**, and its credits are refunded. Layouts link only to screens whose status is `ready`. A failed edit keeps the old code and reports what couldn't be done. Removed screens are deleted when the run finishes successfully.
+- Price: 5 credits for a round touching ≤ 2 regenerated files, +3 per extra file, +10 per new screen (`11` §3). The tool result tells the Planner the charge, so it can say it.
+
 ---
 
-## 4. Pipelines (worker; one pg-boss job `agent.step` per step, payload `{runId, step}`)
+## 4. Pipelines (worker; one pg-boss job `agent.step` per step, payload `{runId, projectId, userId, step}`)
 
 ### 4.1 Build (after confirm)
 ```
-charge credits (10 per screen) ─► foundation ─► components ─► screen:<id> × N (sequential;
+charge credits (10 per screen, + AI images on Pro) ─► foundation ─► components ─► screen:<id> × N (sequential;
    `AGENT_SCREEN_CONCURRENCY` default 1; with 2, screen 1 is built alone first so it can be the style reference) ─► tab layout + routes (platform, deterministic) ─► backend setup
    (if connected) ─► snapshot ─► build_summary message ─► status ready
 ```
@@ -175,7 +181,9 @@ charge credits (10 per screen) ─► foundation ─► components ─► screen
 - **Components** returns 5–10 components ordered simple-first. Each may import only earlier ones, which makes cycles impossible. Each draws only from props (no data access, no navigation), never as a tab bar. A button, a screen header and an empty state are always included.
 - **Screens** get the app context, the components' props APIs, the routes, the screen spec, and the **first finished screen as a style reference**.
 - Each step writes its files through `lib/vfs` (`file_revisions.author = "agent"`) and emits events (§8).
-- **Resumability:** `runs.step` + `runs.lease_id` (see Phase 05). Each step is one `agent.step` job that enqueues the next. A redelivered earlier step is ignored, and a retry of the current step takes over the lease. Resuming an interrupted build isn't charged again.
+- **Resumability:** `runs.step` + `runs.lease_id` + `runs.heartbeat_at` (see Phase 05). Each step is one `agent.step` job that enqueues the next step through the outbox. A redelivered earlier step is ignored, and a retry of the current step takes over the lease.
+- **Resume vs retry (ADR-003 #7).** *Resume* is the same run continuing after a crash or redelivery; it's automatic and never charged again. *Retry* is a new run the person starts after a failure. The failed run has already refunded its unbuilt work, and the retry charges what's still unbuilt.
+- **Step jobs never finish the run.** Only the final `advance(null)` marks it `succeeded`. `failRun` runs only on the last attempt or a non-retryable error (ADR-003 #2).
 
 ### 4.2 Change (after `update_app`)
 ```
@@ -205,7 +213,7 @@ Keep these in one module, so the generators can't drift apart. Write them in our
 | **SCREEN: design** | One focal point; type scale like 30/22/17/15/13 using weight and spacing; 8-pt grid; card radius 12–20 with soft shadow **or** hairline border; tinted icon containers; `Pressable` pressed states; 44-pt targets; accessibility labels and roles; every key element present. |
 | **SCREEN: keep editable** | **Each visible element is its own JSX element on its own line with its own named style.** No config-driven rendering. Fixed copy directly in the JSX. `.map` only for real lists. Inline editing (Phase 10) depends on this. |
 | **TAB rules** | Tab screens never draw a tab bar (the shared layout does) and use `SafeAreaView edges={["top"]}`. Non-tab screens never draw one. |
-| **IMAGE_RULES** | If `IMAGEKIT_ENABLED`, images are provider generation URLs as one plain string (`06` §7), at most 4 per screen and 8 per data step, with descriptions that contain no text. Otherwise use placeholder URLs. Keep existing image URLs unchanged when editing. |
+| **IMAGE_RULES** | Injected per request based on the **project owner's plan**: if `IMAGEKIT_ENABLED` and the owner is on Pro, images are provider generation URLs as one plain string (`06` §7), at most 4 per screen and **8 per build**, with descriptions that contain no text. Free plans and `IMAGEKIT_ENABLED=false` use placeholder URLs only. Keep existing image URLs unchanged when editing. |
 | **COMPONENT rules** | Props type exported first, default export, 20–80 lines, data and actions only via props, a `style` prop on the outer element, one element per line, the same design and theme rules. |
 
 ---
@@ -245,32 +253,39 @@ user:    APP CONTEXT (app, design, collections + sample record,
 - All screen steps in a build share the APP CONTEXT prefix, so it's read from cache after the first screen. Verify `cache_read_input_tokens > 0` in evals.
 - The style reference (first finished screen) goes **after** the breakpoint, because it isn't available for screen 1.
 - No timestamps or ids in system blocks. Fixed tool list for the Planner.
+- IMAGE_RULES has two variants (Free: placeholders; Pro: ImageKit). So each generator has two system-prompt variants, each cached separately. Pick by the project owner's plan at the start of the run and keep it for the whole run.
 
-## 8. Run event catalogue (`run_events.type`)
+## 8. Event catalogue (`run_events.type`, project-scoped stream)
 
-| type | data |
-|---|---|
-| `run.status` | `{status}` |
-| `thinking.summary` | `{text}` |
-| `assistant.delta` / `assistant.done` | `{text}` streaming Planner prose |
-| `plan.ready` | `{messageId}` |
-| `theme.ready` | `{themeIds[]}` |
-| `components.ready` | `{names[]}` |
-| `screen.started` / `screen.done` / `screen.failed` | `{screenId, error?}` |
-| `file.writing` | `{path, lines}` (throttled ≤ 4/s, from the streamed text) |
-| `file.written` | `{path, revisionId}` |
-| `validation.result` | `{path, problems: n, repaired: bool}` |
-| `upgrade` | `{reason}` (plan limit reached; opens the upgrade dialog, Phase 18) |
-| `backend.status` | `{state, services[]}` |
-| `export.progress` / `build.status` / `publish.step` | `{runId, step, status, url?}` (Phases 14–16) |
-| `run.error` / `run.done` | `{code, message, retryable}` / `{summaryMessageId, snapshotId}` |
+All events go to the project stream (`/api/projects/:id/events`, ADR-003 #5). `run_id` is set for run events and null for writes outside a run.
+
+| type | data | run? |
+|---|---|---|
+| `run.status` | `{status}` | run |
+| `thinking.summary` | `{text}` (also progress-update thinking blocks) | run |
+| `assistant.delta` / `assistant.done` | `{text}` streaming Planner prose | run |
+| `assistant.reset` | `{attempt}`: a retried `agent.chat` is re-streaming, so clear the partial reply | run |
+| `plan.ready` | `{messageId}` | run |
+| `plan.updated` | `{fields: ["themePackage" \| "screens" \| "collections" \| "components" \| "backend" …]}`: re-read the plan; re-render derived files (theme switch, set_theme, update_app, restore) | either |
+| `theme.ready` | `{themeIds[]}` | run |
+| `components.ready` | `{names[]}` | run |
+| `screen.started` / `screen.done` / `screen.failed` | `{screenId, error?}` | run |
+| `file.writing` | `{path, lines}` (throttled ≤ 4/s, from the streamed text) | run |
+| `file.written` | `{path, revisionId, author}` (`agent` · `user_inline` · `user_code` · `system`) | either |
+| `validation.result` | `{path, problems: n, repaired: bool}` | run |
+| `upgrade` | `{reason}` (plan limit reached; opens the upgrade dialog, Phase 18) | either |
+| `backend.status` | `{state, services[]}` | either |
+| `export.progress` / `build.status` / `publish.step` | `{runId, step, status, url?}` (Phases 14–16) | run |
+| `device.status` | `{mode: "devserver" \| "snack", state, url?, clients?}` (Phase 11) | either |
+| `run.error` / `run.done` | `{code, message, retryable}` / `{summaryMessageId, snapshotId}` | run |
 
 File contents never travel in events; clients fetch them by revision id.
 
 ## 9. Sessions and transcripts
 
-- The Planner's chat is the conversation. Store each assistant turn's full `content` (thinking blocks included) in `messages.payload.api` and replay it unchanged. Append-only: never edit earlier turns.
-- **Start new session** (chat header button, from the reference app) starts a fresh transcript. The plan and project state carry everything needed (§3.2 rule 2). Use it also when a session grows long, instead of compaction.
+- The Planner's chat is the conversation. Each turn's user message, PROJECT STATE message and assistant content (thinking blocks included) are stored in `messages.payload.api` and replayed byte-for-byte. Append-only: never edit, rebuild or drop earlier entries (§3.1).
+- **Start new session** (chat header button, from the reference app) inserts a `session_break` message; the Planner replays only messages after the last break. The plan and project state carry everything needed (§3.2 rule 2). Use it also when a session grows long, instead of compaction.
+- **Automatic session breaks:** when `PLANNER_PROMPT_VERSION` changes (a deploy changed the prompt or tools), the server inserts a `session_break` before the next Planner turn (§3.1).
 - Generators are **stateless single calls** (plus at most one repair turn), so they have no long transcripts to manage.
 
 ## 10. Limits and safety valves
@@ -282,7 +297,7 @@ File contents never travel in events; clients fetch them by revision id.
 | Tabs | 3–5 | `MIN_TABS`, `MAX_TABS` |
 | Components per library | 5–10 | prompt + validator |
 | Repair rounds per file | 1 | — |
-| Generated images | 4 per screen, 8 per data step | prompt + server cap |
+| Generated images | Free: 0 (placeholders) · Pro: 4 per screen, 8 per build (4 credits each) | prompt + server cap |
 | Minimum balance to message the Planner | 5 credits | Phase 18 |
 | Planner tool calls per message | 3 | handler |
 

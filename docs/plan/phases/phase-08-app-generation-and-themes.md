@@ -5,8 +5,8 @@
 | Video chapter(s) | Ch.11 "Generate Mobile App with AI" (1:11:10), first half up to ~1:27:00; reference repo Ch.6 (+ Ch.8 components, Ch.11 shared tab layout) |
 | Branch | `feat/08-app-generation-and-themes` |
 | Depends on | Phase 05 (jobs, step chaining), Phase 06 (Planner, confirmed plan), Phase 07 (template, renderers, VFS, preview runtime) |
-| Effort (solo dev + Claude Code) | ~5–7 days (plus ongoing prompt tuning with evals) |
-| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; screens build sequentially so screen 1 can be the style reference). `AI_BUILDER_MODEL` exists from Phase 06. |
+| Effort (solo dev + Claude Code) | ~6–8 days (was 5–7; adds the sandbox service skeleton for smoke renders, ADR-003 #18), plus ongoing prompt tuning with evals |
+| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; with `2`, the reference screen is built alone first, then the rest two at a time; ADR-003 #11). `SANDBOX_URL`, `SANDBOX_JOB_SECRET` (worker → sandbox service). `AI_BUILDER_MODEL` exists from Phase 06. |
 
 ## Goal
 When the plan is confirmed (button or `confirm_plan`), a chain of `agent.step` jobs turns it into a working Expo app (`05-ai-agent-design.md` §4.1):
@@ -47,10 +47,12 @@ Each output is validated, with **one repair round** if needed. The platform rend
 - Snapshot-test every assembled request, so accidental byte changes to cached prefixes show up in review.
 
 ### 3. Step dispatcher (`worker/handlers/agent-step.ts`)
-`agent.step {runId, step}` → `claimStep` → dispatch by step name → `advance(nextStep)`:
+`agent.step {runId, projectId, userId, step}`, wrapped as a **step job** (Phase 05: never finishes the run itself; `failRun` only on the final attempt or a non-retryable error) → `claimStep` → dispatch by step name → `advance(nextStep)`:
 ```
-foundation → components → screen:<firstScreenId> → screen:<id2> … → finish
+foundation → components → screen:<referenceScreenId> → screen:<rest, in plan order> … → finish
 ```
+- `referenceScreenId` = the first screen in plan order that **isn't `sign-in`** (content-rich, so it makes a good style reference). The remaining screens follow in plan order, `sign-in` included. With `AGENT_SCREEN_CONCURRENCY=2`, the reference screen is built alone and the rest two at a time (the dispatcher fans out with one `agent.step` per screen and a join counter in `runs.steps`).
+- `runs.steps` records each step's status (`queued`/`running`/`done`/`failed`). Resume and refunds (Phase 18) read it.
 - `finish` renders platform files (already derived from `projects.plan`), runs the render smoke test (step 8), calls the backend-setup hook (Phase 13, no-op now), creates a `project_snapshots` row (`files`, `screens`, `label: "Initial build"`), writes a `build_summary` message (template text: "Built 4 screens: Sign In, Today, …"), sets status `ready`, and emits `run.done`.
 - Each step checks `isCanceled` and `assertLease` before writing, and skips screens already `ready` (resume after crash/retry, never charged twice).
 
@@ -59,7 +61,7 @@ foundation → components → screen:<firstScreenId> → screen:<id2> … → fi
 - Request: app name, tagline, summary, target users, confirmed design, screens with purposes and key elements.
 - Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names, `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again").
 - Then the platform: `deriveThemePackage()` (full tokens + contrast + tinted neutrals) → `projects.plan.themePackage = {themes, activeThemeId: themes[0].id}`, `projects.plan.collections = …` → re-render `theme/themes.ts`, `data/schema.ts`, `data/seed.ts` → emit `theme.ready`, `plan.updated`.
-- Images: when `IMAGEKIT_ENABLED`, image fields in sample records use generation URLs (≤ 8 per step). The wait-and-store post-processing is Phase 12; until then keep placeholder URLs.
+- Images (ADR-002, `11` §3): **Free projects always use placeholder URLs.** When `IMAGEKIT_ENABLED` and the project owner is on Pro, image fields may use generation URLs: at most 8 per build across all steps, each charged 4 credits and included in the build estimate (Phase 18). The wait-and-store post-processing is Phase 12; until then everything uses placeholders.
 
 ### 5. Components step
 - Schema `{ components: [{name, purpose, code}] }`, 5–10 entries, PascalCase names, ordered simple-first.
@@ -86,13 +88,13 @@ Per `05` §6:
 Output `{problems: Issue[], warnings: Issue[]}` → compact text (≤ ~4 KB) for repair prompts, plus a `validation.result` event. Unit tests: one broken-on-purpose fixture file per rule.
 
 ### 8. Render smoke test (`worker/agent/smoke.ts`)
-At `finish`: Playwright + Chromium loads `/preview-runtime/harness.html` with the materialized `preview` target, renders each route, and collects `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
+At `finish`, the worker calls the **sandbox service** (ADR-003 #18): `POST $SANDBOX_URL/render` with a per-job HMAC token (`SANDBOX_JOB_SECRET`) and a signed storage URL of the materialized `preview` target. The sandbox service has no DB access and no platform secrets, runs non-root with an env allowlist, and restricts egress where the host allows. It serves the bundled `public/preview-runtime/` from a local static server, loads `harness.html` in Playwright + Chromium, renders each route and returns the collected `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
 
 ### 9. Theme picker + `set_theme`
 - **Theme dropdown** centered at the top of the canvas (where the reference app put it): theme names with swatches, the active one checked.
 - `POST /api/projects/:id/theme {themeId}` (editor) → update `projects.plan.themePackage.activeThemeId` → `plan.updated` → all frames get `theme.set` (CSS variables, instant). The interactive preview keeps its state, and native targets get a re-rendered `theme/themes.ts`. No LLM, no credits.
-- Add the Planner tool `set_theme` (`{themeId}` or `{newTheme: {name, mode, colors}}`) and the static prompt line "use set_theme for whole-app colors and looks; say it's done". A `newTheme` goes through `deriveThemePackage` (contrast-fixed) and is appended and activated. Deploy-time tool list change only (Phase 06 note).
-- **Interim behaviour for built apps** (until Phase 09 adds `update_app`): the Planner may answer questions and use `set_theme`. For other change requests it says plainly that screen changes come in the next release. Phase 09 deletes that line, and the static prompt there also says to ignore earlier replies like it (R-note in `05` §3.2 rule 3).
+- **Implement** the Planner tool `set_theme`. Its schema (`{themeId}` or `{newTheme: {name, mode, colors}}`) and its prompt section have existed since Phase 06, so the tool list and system text don't change (ADR-003 #1). A `newTheme` goes through `deriveThemePackage` (contrast-fixed) and is appended and activated. It emits `plan.updated {reason: "theme"}` on the project stream.
+- **Interim behaviour for built apps** (until Phase 09): `update_app` is still the Phase 06 stub that answers "not available yet", so the Planner tells the person plainly. No prompt text changes now. Phase 09 replaces the stub implementation only, and the static prompt already says to ignore earlier "not available" replies (`05` §3.2 rule 3).
 
 ### 10. Chat and canvas progress UI
 - Chat: a build progress card "Building 2 of 4: Today", with per-screen ticks/errors and a Cancel button (`POST /api/runs/:id/cancel`).
@@ -111,13 +113,14 @@ lib/ai/generate.ts
 lib/ai/component-api.ts
 lib/ai/prompts/{rules.ts,app-context.ts,foundation.ts,components.ts,screen.ts,repair.ts}
 lib/ai/schemas/{foundation.ts,components.ts}
-lib/ai/tools/planner-tools.ts              (+ set_theme)
-lib/ai/prompts/planner.ts                  (+ theme section, interim built-app line)
+lib/ai/tools/planner-tools.ts              (set_theme implemented; schemas unchanged since Phase 06)
 lib/validate/{index.ts,syntax.ts,imports.ts,theme.ts,data.ts,routes.ts,markup.ts,typecheck.ts,stubs/*.d.ts}
 lib/theme/derive.ts                        (from Phase 07; + newTheme path)
 worker/handlers/agent-step.ts              (real dispatcher)
 worker/agent/{foundation.ts,components.ts,screen.ts,finish.ts,smoke.ts}
-preview-runtime/harness.html               (headless render harness)
+preview-runtime/harness.html               (from Phase 07)
+sandbox/{index.ts,render.ts,auth.ts,Dockerfile}   (sandbox service skeleton: /render; reused by Phases 11, 16, 17)
+lib/sandbox/client.ts                      (worker → sandbox: signed URL + per-job token)
 app/api/projects/[projectId]/theme/route.ts
 components/workspace/ThemePicker.tsx
 components/chat/renderers/build-progress.tsx
@@ -130,7 +133,7 @@ evals/{run.ts,prompts.jsonl}               (smoke subset)
 - `projects.plan`: adds `themePackage`, `collections`, `components` (`03` §2).
 - `screens.status`: `planned | building | ready | error`.
 - `project_snapshots` rows at the end of each build (`files`, `screens`, `label`).
-- `runs.step` / `runs.lease_id` used by the step chain. `messages.kind = build_summary`.
+- `runs.step` / `runs.lease_id` / `runs.steps` used by the step chain. `messages.kind = build_summary`.
 
 ## API surface
 | Method | Path | Auth | Request → Response |
@@ -140,7 +143,7 @@ evals/{run.ts,prompts.jsonl}               (smoke subset)
 | (Planner tool) | `set_theme` | worker | `{themeId}` \| `{newTheme}` → `{activeThemeId}` |
 
 ## Acceptance checklist
-- [ ] Confirming the habit-tracker plan produces Sign In + 3 screens in roughly 2–5 minutes, with live frame states and live code in the Code tab.
+- [ ] Confirming the habit-tracker plan produces Sign In + 3 screens **within the p90 build time measured in S2 and recorded in the G0 ADR** (sequential; report the concurrency-2 time too), with live frame states and live code in the Code tab.
 - [ ] The app works in the interactive preview: sign in (local), add, complete and delete a habit, see the change on another tab. Lists scroll, and headers and main buttons stay pinned.
 - [ ] Every screen imports shared components where they fit, draws no tab bar (tab apps) and contains no color literals (validator report is clean).
 - [ ] Five themes appear in the picker. Switching is instant across all frames, with no LLM call and no `ai_usage` row. Asking in chat "make it dark" switches or adds a theme via `set_theme`, and no screen is rebuilt.
@@ -149,7 +152,8 @@ evals/{run.ts,prompts.jsonl}               (smoke subset)
 - [ ] Killing the worker mid-build resumes from the current screen, with no duplicate files and no double charge-hook call.
 - [ ] Refreshing mid-build resumes progress, with nothing missing.
 - [ ] The materialized app (`export` target) runs with `npx expo start`.
-- [ ] **Security:** generators can't write outside `app/<id>.tsx`, `app/(tabs)/<id>.tsx` and `components/<Name>.tsx` (vfs tests), and generated code runs only in sandboxed iframes and the smoke harness.
+- [ ] **Security:** generators can't write outside `app/<id>.tsx`, `app/(tabs)/<id>.tsx` and `components/<Name>.tsx` (vfs tests). Generated code runs only in sandboxed iframes and in the sandbox service, which rejects requests without a valid per-job token and has no DB credentials in its env (test asserts it).
+- [ ] Free projects never get AI image URLs; Pro builds stay within 8 images.
 - [ ] **AuthZ:** the theme endpoint and cancel return 404 for non-members and 403 for viewers.
 
 ## Claude Code prompt
@@ -170,8 +174,9 @@ Build, one commit per numbered step:
 1. lib/ai/generate.ts (generateJson with structured outputs, generateFile streaming text).
 2. Prompt modules: rules.ts in our own words per 05 §5, app-context with a cache breakpoint,
    foundation/components/screen/repair prompts; snapshot tests of assembled requests.
-3. agent.step dispatcher with claimStep/assertLease/advance: foundation → components →
-   screen:<id>… → finish.
+3. agent.step dispatcher (stepJob wrapper, payload {runId, projectId, userId, step}) with
+   claimStep/assertLease/advance: foundation → components → screen:<first non-sign-in> →
+   remaining screens in plan order (optional concurrency 2 after the reference) → finish.
 4. Foundation: schema, validation, one repair, deriveThemePackage, store in projects.plan,
    re-render themes/schema/seed, theme.ready.
 5. Components: schema, per-component validation (ordered imports, props-only, no tab bar),
@@ -179,9 +184,10 @@ Build, one commit per numbered step:
 6. Screens: APP CONTEXT + spec + tab rules + style reference (first finished screen);
    stream file.writing; validate → one repair → write or mark error (refund hook no-op).
 7. lib/validate per 05 §6 incl. typecheck-lite with .d.ts stubs; one failing fixture per rule.
-8. Render smoke test via Playwright harness with one repair on runtime errors.
-9. Theme picker (top-center of canvas), POST /theme, Planner set_theme tool (+ newTheme),
-   interim "screen changes come next" line for built apps.
+8. Sandbox service skeleton (sandbox/, no DB access, no secrets, per-job token) and the render
+   smoke test via its Playwright harness, with one repair on runtime errors.
+9. Theme picker (top-center of canvas), POST /theme, implement the existing set_theme stub
+   (+ newTheme); emit plan.updated. Don't change the tool list or system prompt.
 10. Build progress UI (chat card, frame states, live Code tab), cancel.
 11. Fixtures + integration tests (resume after worker kill), eval smoke subset.
 
@@ -193,10 +199,10 @@ Finish with lint/typecheck/tests and a short eval run (--limit 3) with cost per 
 
 ## Pitfalls & notes
 - **Don't let stream text become a revision.** Only validated output is written; the stream is for display. This keeps frames from hot-swapping half-written code.
-- **Style reference ordering:** screen 1 has no reference, so its quality sets the tone for the app. Build the first *non-sign-in* screen first when Sign In is the first screen, so the reference is a content-rich screen.
+- **Style reference ordering:** the reference screen has no reference, so its quality sets the tone for the app. That's why the dispatcher builds the first *non-sign-in* screen first (step 3).
 - **Structured outputs and long JSON:** the component library can be 10–15k output tokens. Use streaming with a large `max_tokens`, and treat `max_tokens` truncation as a repair case ("the JSON was cut off; return fewer, shorter components").
 - **Cache invalidators:** component code in the APP CONTEXT would bust the cache whenever one component changes. Only the props APIs go into the APP CONTEXT, and the code never does.
 - **CSS variables vs computed colors:** the theme rules forbid `colors.primary + "20"`. That would break CSS variables in the preview and theme switching on device. Keep the validator rule strict.
 - **Sign-in redirect loops:** screens that redirect on `user` must wait for `loading === false`. That rule is in the screen rules, and the smoke test catches infinite navigation (add a navigation-count guard in the harness).
-- **The reference app's bug to avoid:** after the first build its agent said "editing by chat isn't available", and later kept repeating it. Keep the interim line short, and remove it in Phase 09 (whose prompt also tells the Planner to ignore such earlier replies).
+- **The reference app's bug to avoid:** after the first build its agent said "editing by chat isn't available", and later kept repeating it. Here the "not available yet" answer comes from the stub tool result, not the prompt. The prompt already tells the Planner to ignore earlier such replies once the tool works (Phase 09).
 - Keep `MAX_SCREENS_DEFAULT=3` during development for speed and cost. Users can add screens by chat in Phase 09.

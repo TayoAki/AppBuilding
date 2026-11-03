@@ -2,7 +2,7 @@
 
 Every generated app is an Expo app inside **one fixed structure**. The generators write screens and shared components. The **platform** writes everything derived from data (themes, schema, seed data, tab layout, backend config) and every config file.
 
-This is what lets one set of files run in the browser preview, on Expo Snack/Expo Go, in zip/GitHub exports, in EAS builds and on the web. It also stops the agent from adding dependencies or scripts.
+This is what lets one set of files run in the browser preview, on phones via Expo Go, in zip/GitHub exports, in EAS builds and on the web. It also stops the agent from adding dependencies or scripts.
 
 > **Revised after the reference implementation** (`13-reference-implementation.md`). Changes from v1: the agent no longer writes data stores (generic hooks from `@/lib/backend` instead); there's no fixed platform UI library (each app gets a generated shared-component library); themes are imported as a `colors` object, with CSS variables in the preview; the platform writes schema, seed and themes from JSON.
 
@@ -10,11 +10,17 @@ Template source: `templates/expo-app/` (versioned; `projects.template_version`).
 
 ---
 
-## 1. Expo SDK pinning
+## 1. Expo SDK pinning (D7 = SDK 58, ADR-002)
 
-- Pin the newest SDK that **the published `snack-sdk` supports**, and check that store **Expo Go** opens it. The reference app is pinned to **SDK 54**, because `snack-sdk` didn't go past 54 and newer Expo Go builds refuse older SDKs. Re-check both at Phase 07 start (decision D7).
-- Dependency versions for export/builds come from `expo/bundledNativeModules.json` of the pinned `expo` version. Moving SDKs means a new template version, new dependency versions, and the Snack SDK constant, together.
-- The Planner/generator prompts say "Expo SDK `<pinned>`, Expo Router".
+- The template pins **Expo SDK 58**, the only SDK the store **Expo Go** (58.0.5) supports, and the current SDK for EAS (`15` §1).
+- Phone preview is decoupled from Snack (Phase 11):
+  - **Path B (default): hosted Expo dev server.** `expo start` per active session in the sandbox service, reachable by Expo Go, with Fast Refresh on file writes. It works on any SDK that store Expo Go supports.
+  - **Path A: Expo Snack.** Used only when a **published** `snack-sdk` supports the template SDK. Today it tops out at 54 (`main`: 56), so Path A is off until it catches up. Switch with `DEVICE_PREVIEW_MODE`.
+  - **Path C (fallback): web preview on the phone.** Open the project's web preview URL in the phone browser. Always available.
+- The reference app's SDK 54 pin is **not** followed: store Expo Go refuses SDK 54, and iOS users can't install an older Expo Go.
+- Dependency versions for export/builds come from `expo/bundledNativeModules.json` of the pinned `expo` version. Moving SDKs means a new template version (§11), new dependency versions, and re-checking Snack support, together.
+- `app.json` sets `web.output: "single"` explicitly (SDK 58 Expo Router defaults to `"server"`).
+- The Planner/generator prompts say "Expo SDK 58, Expo Router".
 
 ## 2. Layout of a generated app
 
@@ -84,7 +90,7 @@ The Foundation Designer returns the base tokens. The platform derives soft tints
 
 **How switching works without regenerating:**
 - **Preview runtime:** `colors.primary` resolves to `"var(--c-primary)"` and so on. react-native-web passes these through to CSS, so a theme switch only sets CSS variables on the frame's root. It's instant, with no re-render or re-transpile.
-- **Native (Snack, builds):** `theme/index.ts` resolves `colors` from `themes.ts` `activeThemeId` at load. A switch rewrites `activeThemeId`, and Snack live-reloads.
+- **Native (dev server / Snack, builds):** `theme/index.ts` resolves `colors` from `themes.ts` `activeThemeId` at load. A switch updates `projects.plan.themePackage.activeThemeId` (the only source, ADR-003 #4), emits `plan.updated`, and the re-rendered `theme/themes.ts` is pushed to the device session, which live-reloads.
 - `set_theme` can also **add** a theme (e.g. "make it purple"), which goes through the same derivation and contrast pipeline.
 
 **Person-chosen colors:** an inline edit or an explicit "make this button #2563EB" writes a literal hex on that element. It's allowed by the validator (it was already in the file or named in the request) and **doesn't follow theme switches**. The inspector says so.
@@ -120,9 +126,11 @@ const { url } = await uploadFile(uri);
 
 ## 7. Images
 
-- When `IMAGEKIT_ENABLED=true`, generators write image URLs as **one plain string** of the form `<IMAGEKIT_URL_ENDPOINT>/ik-genimg-prompt-<description with %20, no commas/slashes/colons/quotes>/<short-name>.jpg` (verify the current syntax in ImageKit docs, Q2).
-- Before saving a step's code or data, the server finds those URLs (at most 8 per step, placeholders past that). It waits for each image to finish generating, because a phone can't render ImageKit's "still preparing" page, then copies it into the project's folder and rewrites the URL to the stored copy. See Phase 12.
-- Otherwise, placeholders: `https://picsum.photos/seed/<word>/400/300`. No local assets in generated code.
+- **Free plans:** placeholders only, `https://picsum.photos/seed/<word>/400/300` (ADR-002: a generated image costs us ≈ $0.12).
+- **Pro plans with `IMAGEKIT_ENABLED=true`:** generators write image URLs as **one plain string**: `<IMAGEKIT_URL_ENDPOINT>/ik-genimg-prompt-<percent-encoded description, ≤ 200 chars, no commas/slashes/colons/quotes>/<short-name>.jpg` (syntax verified, `15` §5).
+- Before saving a step's code or data, the server finds those URLs (at most 4 per screen and **8 per build**; placeholders past that). It fetches each one until the response no longer has `is-intermediate-response: true` (timeout 60 s → placeholder), then copies the image into the project's folder and rewrites the URL to the stored copy. A phone can't render ImageKit's "being prepared" page.
+- Each kept build-time image costs **4 credits**, included in the build estimate (`11` §3). To regenerate, change the file name: ImageKit caches by path, even if the prompt changes. See Phase 12.
+- No local assets in generated code.
 
 ## 8. Shared components
 
@@ -140,15 +148,20 @@ const { url } = await uploadFile(uri);
 ## 10. Materialization (`lib/vfs/materialize.ts`)
 
 ```
-materialize(projectId, { target: "preview" | "snack" | "export" | "eas" | "web", snapshotId? })
+materialize(projectId, { target: "preview" | "devserver" | "snack" | "export" | "eas" | "web", snapshotId? })
   1. render platform files from template + projects.plan (themes, schema, seed, layouts, config)
   2. overlay project_files (screens, components)
   3. target-specific transforms:
-     - snack:  path aliases → relative imports; App.js entry replaces app/_layout.tsx;
-               "expo-router" → small shim on React Navigation (bottom-tabs for tab apps); the generated
-               App.js reproduces the root layout: providers, `firstScreenId` as initial route, screen options  (Phase 11)
-     - export/eas/web: package.json with versions from bundledNativeModules.json; eas.json;
-               identity (`projects.slug`, `android_package`, `bundle_id`, set once at first build) (Phase 15);
+     - devserver (Path B, default): the full Expo project as for export, written into the sandbox
+               session dir with the cached template node_modules; later file.written / plan.updated
+               events rewrite single files so Metro Fast Refresh updates connected phones  (Phase 11)
+     - snack (Path A only, when a published snack-sdk supports the template SDK): path aliases →
+               relative imports; App.js entry replaces app/_layout.tsx; "expo-router" → small shim on
+               React Navigation (bottom-tabs for tab apps); App.js reproduces the root layout: providers,
+               `firstScreenId` as initial route, screen options  (Phase 11)
+     - export/eas/web: package.json with versions from bundledNativeModules.json; eas.json
+               (appVersionSource "remote", owner set);
+               identity (`projects.slug`, `android_package`, `bundle_id`, set once at first build/publish) (Phases 15/16);
                app.json web.output = "single" (SPA: screens never render in Node)
      - export: README (npm install && npx expo start)
   4. assets
@@ -156,12 +169,15 @@ materialize(projectId, { target: "preview" | "snack" | "export" | "eas" | "web",
 
 ## 11. Template versions and upgrades
 
-Expo ships new SDKs a few times a year, and `snack-sdk` and Expo Go follow. Projects must be able to move forward without being regenerated.
+Expo ships new SDKs a few times a year, and Expo Go and `snack-sdk` follow. Projects must be able to move forward without being regenerated.
 
-- **Versioning.** `templates/expo-app/VERSION` is `expo-<sdk>@<rev>` (e.g. `expo-54@3`). Every project stores `template_version`. Platform files are rendered from the version the project is on: old template versions stay in the repo under `templates/expo-app/versions/<version>/` until no project uses them.
-- **Upgrade scripts.** `templates/migrations/<from>__<to>.ts` exports `migrate({ plan, files }) → { plan, files, notes[] }`. These are deterministic codemods: renamed imports, changed APIs, new required props. A script never calls the model. If a change can't be automated, it lists the screens needing an AI change in `notes`.
-- **Dry run first.** `upgradeProject(projectId, to)` runs the chain of scripts in memory, validates every file (`05` §6), and runs the render smoke test (`07` §8). It applies the result (new revisions with `author = "system"` + snapshot) only if both pass. Otherwise it reports, and the project stays on its version.
+**The rule (ADR-003 #9):**
+- **Template revisions within one SDK** (`expo-58@1` → `expo-58@2`: bug fixes, new `lib/backend` providers, template components) **render from HEAD for every project** and must stay **backward compatible** with files generated against earlier revisions of that SDK. `template_version` records the revision for diagnostics only. A revision that can't be backward compatible must be treated like an SDK change.
+- **Only SDK changes are versioned.** `templates/expo-app/` is HEAD for the current SDK. The previous SDK's template is kept under `templates/expo-app/versions/expo-<sdk>/` until no project uses it.
+
+**Upgrading a project to a new SDK** (machinery built in **Phase 19b**, before the first SDK bump):
+- **Upgrade scripts.** `templates/migrations/<fromSdk>__<toSdk>.ts` exports `migrate({ plan, files }) → { plan, files, notes[] }`. These are deterministic codemods: renamed imports, changed APIs, new required props. A script never calls the model. If a change can't be automated, it lists the screens needing an AI change in `notes`.
+- **Dry run first.** `upgradeProject(projectId, to)` runs the scripts in memory, validates every file (`05` §6), and runs the render smoke test (`07` §8). It applies the result (new revisions with `author = "system"` + snapshot) only if both pass. Otherwise it reports, and the project stays on its version.
 - **UX.** A banner "This app uses SDK X. Upgrade to preview on current Expo Go" offers **Upgrade** (dry run → apply) and **Undo** (restore the pre-upgrade snapshot). Admins can run batch upgrades as a job (`runs.kind = template_upgrade`).
-- **Process for a new SDK:** add the new template version and its migration script, run the eval suite on both versions, upgrade the fixture and eval projects, then flip the default for new projects. Existing projects upgrade on demand or in batches.
-- Phase 19 adds the monthly vendor check that triggers this process (`14` §4).
-
+- **Process for a new SDK:** add the new template, its migration script and the preview-runtime shims; run the eval suite on both versions; upgrade the fixture and eval projects; then flip the default for new projects. Existing projects upgrade on demand or in batches.
+- Phase 19b adds the monthly vendor check that triggers this process (`14` §4).
