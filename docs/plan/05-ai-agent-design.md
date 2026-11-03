@@ -65,21 +65,34 @@ Why several agents instead of one tool loop:
 
 ## 3. Planner
 
-### 3.1 Prompt layout (cache-friendly)
-The reference app rebuilds the Planner's whole system prompt from project state on every message. That kills prompt caching. We split it:
+### 3.1 Prompt layout (cache-friendly, append-only)
+The reference app rebuilds the Planner's whole system prompt from project state on every message, which kills prompt caching. We keep the system prompt static and append each turn's state as a mid-conversation system message, placed where the API accepts it:
 
 ```
 system (static, cached):   role · how a project goes · what to act on · changing a built app ·
                            selected element · backend rules · planning rules · talking rules
-messages:                  chat history of the current session (append-only)
-                           …
-                           {role:"system"} PROJECT STATE   ← mid-conversation system message,
-                           {role:"user"}   latest message     placed just before the newest user turn
+tools (fixed, all 5 from Phase 06 on; never changes within a session)
+messages (current session, replayed byte-for-byte from messages.payload.api):
+   {user}       turn 1 message
+   {system}     turn 1 PROJECT STATE      ← right after the user turn
+   {assistant}  turn 1 reply + tool calls (thinking blocks kept)
+   {user}       tool results …
+   …
+   {user}       latest message
+   {system}     latest PROJECT STATE      ← LAST entry (API rule: after a user turn, and last or
+                                             followed by an assistant turn; never messages[0])
 ```
 
-PROJECT STATE (rebuilt each message) holds: phase (`planning` · `awaiting_confirmation` · `building` · `ready` · `failed` with N built), platform, plan name and credits with the price list, backend status and services, reference file names, the current plan JSON (without themes, collections or components), collections (name + field names), components (name, purpose, used-by), and themes (name, id, mode, active).
+**Rules (ADR-003 #1):**
+- **Append-only.** Each turn's PROJECT STATE message is stored in `messages.payload.api` together with that turn and replayed unchanged. Earlier state messages are **never rebuilt, edited or removed**, and nothing else in the history is rewritten either (no image-to-placeholder swaps, no trimming). Editing history invalidates later thinking blocks on Opus 5.5, and newer accounts get a 400 for it. When a session gets long, start a new one (§9) instead.
+- **Fixed tool set.** All five Planner tools (§3.3) are defined from Phase 06 onward. Tools whose server side isn't built yet return a short "This isn't available yet" result. The tool list therefore never changes mid-session.
+- **Prompt versioning.** `lib/ai/prompts/version.ts` exports `PLANNER_PROMPT_VERSION` (a hash of the system prompt + tool definitions). Every Planner turn stores it in `messages.prompt_version`. If the deployed version differs from the session's, the server inserts a `session_break` before running the turn, so a deploy never mixes prompt versions inside one conversation.
+- **Progress-update thinking.** On Opus 5.5, prose written before a tool call can arrive as progress-update `thinking` blocks rather than text. Use `thinking: {type: "adaptive", display: "summarized"}` and render both `thinking` summaries and text deltas in chat (`thinking.summary` / `assistant.delta` events), so the "I understood your idea…" sentence always shows.
+- Verify in tests with the thinking block-binding check set to error on prefix mismatch (preserved-thinking controls beta), so any accidental history edit fails CI instead of production.
 
-Mid-conversation system messages are supported on Opus 5.5 without a beta. They keep the cached prefix intact and carry operator authority. On a model without them, put the state in a `<project-state>` block at the start of the user turn.
+PROJECT STATE holds: phase (`planning` · `awaiting_confirmation` · `building` · `ready` · `failed` with N built), platform, plan name and credits with the price list (`11` §3), backend status and services, reference file names, the current plan JSON (without themes, collections or components), collections (name + field names), components (name, purpose, used-by), themes (name, id, mode, active), and files hand-edited since the last AI change (Phase 10b).
+
+Mid-conversation system messages are supported on Opus 5.5 without a beta header (verified, `15` §7). On a model without them, put the state in a `<project-state>` block at the end of the latest user turn instead.
 
 ### 3.2 Behaviour rules (write these into the static system prompt, in our own words)
 1. **How a project goes:** understand → `propose_plan` → refine (always re-propose the *full* plan, keeping unchanged parts) → confirm (button, or `confirm_plan` only on a clear approval in the **latest** message) → change (`update_app` / `set_theme`; asking counts as approval, so there's no plan card).
@@ -100,10 +113,10 @@ Mid-conversation system messages are supported on Opus 5.5 without a beta. They 
 
 | Tool | Input (summary) | Server effect |
 |---|---|---|
-| `propose_plan` | full `AppPlan` (§3.4) | Validates and caps it; saves a `plan_card` message; sets `projects.plan` (draft); status `planning` |
-| `confirm_plan` | `{}` | Same as the Confirm button: charges credits (Phase 18), enqueues the build pipeline (§4) |
-| `update_app` | `AppChange` (§3.5) | Checks limits and credits, stores `pendingChanges`, enqueues the change pipeline |
-| `set_theme` | `{ themeId }` or `{ newTheme: {name, mode, colors} }` | Writes `theme/active` or adds a theme. Free; no rebuild. |
+| `propose_plan` | full `AppPlan` (§3.4) | Validates and caps it; saves a `plan_card` message; sets `projects.plan` (draft); status `awaiting_confirmation` |
+| `confirm_plan` | `{}` | Same as the Confirm button: charges credits (`11` §3), enqueues the build pipeline (§4) through the outbox |
+| `update_app` | `AppChange` (§3.5) | Runs plan-guard on the **resulting** plan, checks limits, charges credits (`11` §3), applies the target plan with per-screen status, stores `pendingChanges`, enqueues the change pipeline via the outbox |
+| `set_theme` | `{ themeId }` or `{ newTheme: {name, mode, colors} }` | Updates `projects.plan.themePackage.activeThemeId`, or adds a theme through the derivation + contrast pipeline (`06` §5). Emits `plan.updated`. Free; no rebuild. |
 | `setup_backend` | `{ extras?: ("storage"\|"email"\|…)[], sharedCollections?: string[], acceptEmailPolicy?: boolean }` | Runs provisioning in **server code** (Phase 13). The model never gets raw provider/MCP tools. |
 
 Tool results are short facts ("Plan limit: free plans have 5 screens per project"). The Planner relays them, and never claims work happened when a tool refused.
