@@ -9,7 +9,7 @@
 | New env vars | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO_MONTHLY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`. `CREDIT_USD_VALUE` / `CREDIT_MARKUP` are used only by the optional cost-based mode and the margin report. |
 
 ## Goal
-Turn the builder into a SaaS with **simple, predictable prices**: 10 credits per new screen, 5 per round of changes, 1 per AI image. Chatting, planning and theme switches are free. Free users get 100 one-time credits, 2 projects and 5 screens per project, and can publish to the web but not build native binaries. Pro subscribers get 1,000 monthly credits (spent first), unlimited projects, 10 screens per project and native builds. Limits live in one file and are enforced on the server. Stripe handles checkout, the customer portal and renewals.
+Turn the builder into a SaaS with **simple, predictable prices**: 10 credits per new screen; 5 per round of changes covering up to 2 regenerated files, +3 per extra file; 4 per AI image (1 for background removal). Chatting, planning and theme switches are free. Free users get 100 one-time credits, 2 projects and 5 screens per project, and can publish to the web but not build native binaries. Pro subscribers get 1,000 monthly credits (spent first), unlimited projects, 10 screens per project and native builds. Limits live in one file and are enforced on the server. Stripe handles checkout, the customer portal and renewals.
 
 ## What we do differently from the video (and why)
 - **Usage was logged long before billing.** In the video, `credits = 100` never changed until this chapter. We've written an `ai_usage` row per API response since Phase 06. It isn't used to price actions any more, but it powers a **margin report** (credits charged vs real model cost per plan), which tells you when prices or `AI_BUILDER_MODEL` need to change (`11-costs-and-pricing.md`).
@@ -18,10 +18,11 @@ Turn the builder into a SaaS with **simple, predictable prices**: 10 credits per
 - **RevenueCat is not for this.** RevenueCat handles in-app purchases inside *generated mobile apps*, a possible future feature for users' apps. This web SaaS bills through Stripe.
 
 **Reference app notes** (`13-reference-implementation.md`, R15–R16)
-- **R15, flat prices instead of cost-derived credits:** users understand "a screen costs 10" better than token math. A small 4-screen app is 40 credits, so Free's 100 ≈ "2 small apps + 4 edits" and Pro's 1,000 ≈ "25 small apps or 200 edits". We adopt this as the default. The cost-based formula from the first plan version stays as an optional mode (`PRICING_MODE = "cost"` in `plans.ts`).
+- **R15, flat prices instead of cost-derived credits** (amended by ADR-002/003 #7: a per-round file cap and real image prices): users understand "a screen costs 10" better than token math. A small 4-screen app is 40 credits, so Free's 100 ≈ "2 small apps + 4 edits" and Pro's 1,000 ≈ "25 small apps or 200 edits". We adopt this as the default. The cost-based formula from the first plan version stays as an optional mode (`PRICING_MODE = "cost"` in `plans.ts`).
 - **Two balances:** `credits_balance` never expires (signup grant, refunds, top-ups). `monthly_credits_balance` is Pro's allowance and is **spent first**. A renewal *replaces* the monthly balance, ending Pro zeroes it, and Free credits survive both. **Refunds always go to `credits_balance`.**
 - **Charge before anything is saved,** in **one conditional `UPDATE`** (`… WHERE monthly + credits >= cost`), so two tabs can't go below zero. Tool-side checks exist only so the Planner can explain why. The charge decides.
-- **Refunds are computed from what's unbuilt:** `buildCost(unbuilt)` equals exactly what a retry would charge. Each refund has a unique `reference` (`refund:<runId>:<screenId>`), so a retried step can't pay out twice. **Resuming an interrupted build isn't charged again.**
+- **Refunds are computed from what's unbuilt:** `buildCost(unbuilt)` equals exactly what a retry would charge. Each refund has a unique `reference` (`refund:<runId>:<screenId>`), so a retried step can't pay out twice.
+- **Resume vs retry (ADR-003 #7):** a **resume** is the *same run* continuing automatically after a worker crash or redelivery (`runs.step` / `lease_id`), and it's **never charged again**. A **retry** is a *new run* the person starts after a failure was refunded, and it charges `buildCost` of what's still unbuilt.
 - **Stripe (R16):** re-read the subscription from Stripe on every webhook, because events arrive out of order. Credits come **only** from a *paid* invoice whose `billing_reason` is `subscription_create` or `subscription_cycle`. Downgrade sets `cancel_at_period_end`, so Pro lasts until the paid period ends, when `customer.subscription.deleted` moves the user to Free.
 - **Downgraded users** keep their projects and bigger apps and can edit them, but can't add beyond Free limits (no 3rd project, no new screen past 5, no native builds).
 - **Upgrade prompts:** API errors from a limit carry `code` (an `UpgradeReason`), and the agent event stream has an `upgrade` event (`05` §8). Both open the same `UpgradeDialog`.
@@ -31,24 +32,30 @@ Turn the builder into a SaaS with **simple, predictable prices**: 10 credits per
 ### 1. Plan config (`lib/credits/plans.ts`, the single source of truth)
 Every limit and price lives here. The pricing page, popups, gates and Planner state all read from it.
 ```ts
-export const PRICES = { screen: 10, changeRound: 5, aiImage: 1 } as const;  // credits
+export const PRICES = {
+  screen: 10,                 // per new screen
+  changeRound: 5,             // per update_app round, covers ≤ 2 regenerated files
+  changeExtraFile: 3,         // per regenerated file beyond 2 in one round
+  aiImage: 4,                 // generate or prompt-transform (≈ 65 ImageKit units ≈ $0.12)
+  bgRemove: 1,                // e-bgremove (10 units)
+} as const;  // credits
 export const MIN_BALANCE_TO_MESSAGE = 5;
 export const FREE_SIGNUP_GRANT = 100;
 
 export const PLANS = {
-  free: { name: "Free", monthlyCredits: 0,    maxProjects: 2,        maxScreens: 5,
+  free: { name: "Free", monthlyCredits: 0,    maxProjects: 2,        maxScreens: 5,  aiImages: false, maxBuildImages: 0,
           nativeBuilds: false, webPublish: true, exportZip: true, githubPush: true, queuePriority: 0 },
-  pro:  { name: "Pro",  monthlyCredits: 1000, maxProjects: Infinity, maxScreens: 10,
+  pro:  { name: "Pro",  monthlyCredits: 1000, maxProjects: Infinity, maxScreens: 10, aiImages: true,  maxBuildImages: 8,
           nativeBuilds: true,  webPublish: true, exportZip: true, githubPush: true, queuePriority: 10 },
 } as const;
-export type UpgradeReason = "projects" | "screens" | "native_builds" | "credits";
+export type UpgradeReason = "projects" | "screens" | "native_builds" | "ai_images" | "credits";
 ```
 Zip download and Push to GitHub aren't limited by plan. Store credits as integer micro-credits internally (`03-data-model.md` §8) and display whole credits.
 
 ### 2. Costs per action (`lib/credits/costs.ts`)
-- `buildCost(plan, builtScreenIds)` = `PRICES.screen × (screens not yet built)`. It's used for both the charge and the refund, so they always agree.
-- `changeCost(change)` = `PRICES.changeRound` per `update_app` round (any number of screens/components in one round). Plus `PRICES.screen` for each **added** screen.
-- AI images in edit mode (Phase 12 inspector: generate/transform) cost `PRICES.aiImage` each. Images written by generators during a build are included in the screen price.
+- `buildCost(plan, builtScreenIds, plannedImages)` = `PRICES.screen × (screens not yet built)` + `PRICES.aiImage × plannedImages` (Pro only, ≤ `maxBuildImages`; Free builds use placeholders). It's used for both the charge and the refund, so they always agree.
+- `changeCost(change)` = `PRICES.changeRound` + `PRICES.changeExtraFile × max(0, regeneratedFiles − 2)` + `PRICES.screen` for each **added** screen. `regeneratedFiles` counts edited screens and components in the `AppChange` (added screens are priced separately). The Planner's PROJECT STATE carries this price list and the computed cost of the proposed change, so it can say "this change regenerates 4 files, 11 credits" before calling `update_app`. Unit-test the formula.
+- Edit-mode images (Phase 12 inspector): Generate / prompt-transform cost `PRICES.aiImage`, background removal `PRICES.bgRemove`, Replace is free.
 - Free (never charged): Planner chat, `propose_plan` and revisions, theme switches and `set_theme`, inline manual edits, exports.
 
 ### 3. Ledger operations (`lib/credits/ledger.ts`)
@@ -58,13 +65,23 @@ Zip download and Push to GitHub aren't limited by plan. Store credits as integer
 - `resetMonthly(userId, newAmount, invoiceId)`: in one transaction, a `monthly_reset` row (negative of the current monthly balance) plus a `monthly_grant` row, both referencing `invoice:<id>`.
 - Property test: each balance equals the sum of its ledger rows.
 
-### 4. Where charges happen
+### 4. Charge flow (transactional outbox, ADR-003 #7)
+For every charged action:
+1. Generate the `runId` first (`newId("run")`).
+2. **One transaction:**
+   - the conditional balance `UPDATE` (monthly first);
+   - the ledger row(s) with reference `charge:<runId>` (`:monthly` / `:credits` suffixes);
+   - insert the `runs` row with `credits_charged`, `created_by` and `billed_user_id` (the project owner);
+   - insert the `job_outbox` row `{runId, projectId, userId, job}`.
+3. After commit, the worker's outbox dispatcher sends the job to pg-boss and marks the row dispatched. A crash between commit and dispatch is safe, because the dispatcher retries unsent rows.
+
 | Moment | Charge | Refund |
 |---|---|---|
-| Confirm & Build (button or `confirm_plan`) | `buildCost` **before** the build run is created | each screen that ends `error` after its repair round: `PRICES.screen`, reference `refund:<runId>:<screenId>` |
-| Retry / resume of an interrupted build | `buildCost` of what's still unbuilt (finished screens are free) | as above |
-| `update_app` round | `changeCost` before `pendingChanges` is stored | the change round is refunded if *nothing* in it could be applied; added screens that fail are refunded per screen |
-| Inspector AI image | `PRICES.aiImage` before calling the provider | refunded if generation fails |
+| Confirm & Build (button or `confirm_plan`) | `buildCost` (screens + planned images) | each screen that ends `error` after its repair round: `PRICES.screen` (+ its images), reference `refund:<runId>:<screenId>` |
+| **Resume** (same run, after a crash/redelivery) | **nothing** | — |
+| **Retry** (new run started by the person after a failure) | `buildCost` of what's still unbuilt | as above |
+| `update_app` round | `changeCost` (outbox flow above) | the round is refunded if *nothing* in it could be applied; added screens that fail are refunded per screen |
+| Inspector AI image | `aiImage` / `bgRemove` before calling the provider | refunded if generation fails, reference `refund:<assetRequestId>` |
 
 ### 5. Gates (`lib/credits/gate.ts`)
 Call them from API routes and Planner tool handlers **before** enqueueing, and again in the worker at job start (`08-security.md` §2):
@@ -82,6 +99,7 @@ Keep everything that depends on the provider in `stripe.ts`.
 - `POST /api/webhooks/stripe`: verify the signature on the **raw** body. For every relevant event, **re-fetch the subscription from Stripe** and derive the state from that, not from the event payload:
   - `checkout.session.completed`, `customer.subscription.created|updated` → upsert `subscriptions`, set `user.plan` from the fetched status.
   - `invoice.paid` with `billing_reason ∈ {subscription_create, subscription_cycle}` → `resetMonthly(user, 1000, invoice.id)`. No other invoice grants credits.
+  - Every event id is first inserted into `processed_webhook_events(provider='stripe', event_id)`. A conflict means it was already handled, so return 200 immediately. Ledger references (`invoice:<id>`) are the second layer of idempotency.
   - Downgrade from our UI or the portal → `cancel_at_period_end = true` (Pro stays until period end).
   - `customer.subscription.deleted` → `user.plan = 'free'`, zero `monthly_credits_balance` (ledger row `monthly_reset`, reference `sub_deleted:<subId>`).
 - Optional: one-time top-up packs (Checkout mode `payment`) → `grant(purchase)` into `credits_balance`.
@@ -102,14 +120,15 @@ Keep everything that depends on the provider in `stripe.ts`.
 - `lib/providers/billing/{types.ts,stripe.ts,index.ts}`
 - `app/api/billing/{checkout,portal,me,ledger}/route.ts`, `app/api/webhooks/stripe/route.ts`
 - `app/pricing/page.tsx`, `app/billing/page.tsx`, `components/billing/{CreditChip.tsx,UpgradeDialog.tsx,PlanTable.tsx}`
-- Planner tool handlers (`confirm_plan`, `update_app`) and the Confirm route: charge before enqueue. Worker build/change steps: refunds on screen failure.
+- Planner tool handlers (`confirm_plan`, `update_app`) and the Confirm route: charge + run + outbox in one transaction. Worker build/change steps: refunds on screen failure. `worker/outbox-dispatcher.ts` (if not already built in Phase 05).
 - `scripts/{credits.ts,margins.ts}`
 
 ## Database changes
 - `user.plan`, `user.credits_balance`, `user.monthly_credits_balance` (`03-data-model.md` §1).
 - `credit_ledger` with `balance` and unique `reference` (§8).
 - `subscriptions`: `user_id`, `provider`, `customer_id`, `subscription_id`, `plan`, `status`, `current_period_end`.
-- `runs.credits_charged` (`credits_reserved` is unused under flat pricing).
+- `runs.credits_charged`, `runs.credits_refunded`, `runs.created_by`, `runs.billed_user_id` (ADR-003 #3/#6).
+- `job_outbox` (`id`, `run_id`, `job`, `payload` jsonb, `created_at`, `dispatched_at` null) and `processed_webhook_events (provider, event_id) pk`. **Both must be in `03`** (Phase 05 creates the outbox).
 - `ai_usage.cost_usd_micros` (already written since Phase 06) for the margin report.
 
 ## API surface
@@ -124,12 +143,15 @@ Keep everything that depends on the provider in `stripe.ts`.
 
 ## Acceptance checklist
 - [ ] New user gets 100 credits exactly once (a second account with the same verified email doesn't).
-- [ ] Confirming a 4-screen plan charges 40 credits **before** the build starts. A screen that fails after repair is refunded 10, and a retry charges only the unbuilt screens. Replaying a step can't double-refund (unique `reference`).
+- [ ] Confirming a 4-screen plan charges 40 credits (plus 4 per planned AI image on Pro) in the same transaction as the run and outbox rows. A screen that fails after repair is refunded 10. A **resume** after a killed worker charges nothing; a **retry** charges only the unbuilt screens. Replaying a step can't double-refund (unique `reference`).
+- [ ] A change round touching 2 files costs 5, and one touching 4 files costs 11 (unit + e2e). The Planner states the cost before applying a large change.
+- [ ] Killing the web process right after commit still dispatches the job (outbox).
 - [ ] Two tabs confirming at once can't push the balance below zero (concurrency test on the conditional `UPDATE`).
 - [ ] Pro: monthly credits are spent before never-expiring credits; renewal replaces the monthly balance; cancellation keeps Pro until period end, then zeroes monthly credits; refunds land in never-expiring credits.
 - [ ] Free user: a 3rd project → 402 + upgrade dialog; a 6th screen via chat → the Planner says plainly it's a plan limit; App Store build → locked; web publish, zip and GitHub push work.
 - [ ] Below 5 credits the chat refuses new messages with the upgrade dialog; theme switches and inline edits still work.
-- [ ] Stripe test mode: checkout → Pro → 1,000 monthly credits posted once even if `invoice.paid` is replayed 3× or arrives before `checkout.session.completed`. A non-subscription invoice grants nothing.
+- [ ] Stripe test mode: checkout → Pro → 1,000 monthly credits posted once even if `invoice.paid` is replayed 3× (`processed_webhook_events` + reference) or arrives before `checkout.session.completed`. A non-subscription invoice grants nothing.
+- [ ] Free plan: AI image actions show the upgrade dialog (`ai_images`); Free builds use placeholders and aren't charged for images.
 - [ ] A downgraded user can open and edit a 9-screen app but can't add a 10th screen or a 3rd project.
 - [ ] Webhook with an invalid signature → 400; the raw body is used for verification.
 - [ ] Gates are enforced server-side and re-checked in the worker (tests call APIs directly with a free account).
@@ -145,17 +167,21 @@ Read first:
 - docs/plan/03-data-model.md §1 and §8 (two balances, credit_ledger with unique reference, subscriptions)
 - docs/plan/05-ai-agent-design.md §3.3 and §8 (Planner tools, upgrade event)
 - docs/plan/08-security.md (webhooks, abuse)
+- docs/plan/12-decisions-and-open-questions.md ADR-002 (image prices) and ADR-003 (#3, #6, #7, #22)
 
 Implement:
-1. lib/credits/plans.ts as the single source of every limit and price (10/screen, 5/change round,
-   1/AI image; chat, plans, theme switches free; min 5 credits to message; Free 100 one-time, 2 projects,
-   5 screens, no native builds; Pro 1000 monthly spent first, unlimited projects, 10 screens, native builds).
-2. costs.ts (buildCost from unbuilt screens, changeCost), ledger.ts (charge = ONE conditional UPDATE
-   spending monthly first; refunds to never-expiring credits; unique reference on every row; resetMonthly),
-   gate.ts wired into the Confirm route and Planner tools (confirm_plan, update_app) AND re-checked in the
-   worker; refunds for failed screens; resumed builds not charged twice.
+1. lib/credits/plans.ts as the single source of every limit and price (10/screen; 5/change round for
+   ≤2 files +3 per extra file; 4/AI image, 1/background removal; chat, plans, theme switches free; min 5
+   credits to message; Free 100 one-time, 2 projects, 5 screens, no native builds, no AI images; Pro 1000
+   monthly spent first, unlimited projects, 10 screens, native builds, ≤8 AI images per build).
+2. costs.ts (buildCost from unbuilt screens + planned images, changeCost with the file formula),
+   ledger.ts (charge = ONE conditional UPDATE spending monthly first; refunds to never-expiring credits;
+   unique reference on every row; resetMonthly). Charge flow: runId first → one transaction (UPDATE,
+   ledger charge:<runId>, run row with credits_charged/created_by/billed_user_id, job_outbox row).
+   gate.ts wired into the Confirm route and Planner tools AND re-checked in the worker; refunds for
+   failed screens; resume (same run) never charged, retry (new run) charges unbuilt only.
 3. UpgradeReason codes on 402 responses + `upgrade` run event → one UpgradeDialog.
-4. BillingProvider + Stripe: checkout, portal, webhook that re-fetches the subscription on every event,
+4. BillingProvider + Stripe: checkout, portal, webhook (processed_webhook_events dedupe) that re-fetches the subscription on every event,
    grants credits only for paid subscription_create/subscription_cycle invoices, cancel_at_period_end
    downgrades, subscription.deleted → Free + zero monthly credits.
 5. UI: /pricing, credit chip, cost on the Build button, /billing page with ledger history.
@@ -175,5 +201,5 @@ Finish by running lint, typecheck, tests; summarize changes and the Stripe dashb
 - **Webhook ordering.** Stripe can deliver `invoice.paid` before `checkout.session.completed`. Re-fetching the subscription and upserting makes order irrelevant.
 - **Raw body in Next.js.** Read `await req.text()` in the route handler for signature verification. Don't parse JSON first.
 - **Margins move with the model.** If `AI_BUILDER_MODEL` changes (decision D9), re-run the margin report. Flat prices hide cost changes from users, but not from you.
-- **Abuse.** 100 free credits ≈ 10 screens of model spend per signup. Require email verification before the grant, rate-limit project creation per IP, and watch the margin report for free-tier spikes.
+- **Abuse.** 100 free credits ≈ 10 screens of model spend per signup. The grant happens only on **email verification** (ADR-003 #22, Phase 02), and `signup_grants(email_hash)` blocks repeat grants after account deletion. Rate-limit project creation per IP, and watch the margin report for free-tier spikes.
 - **Tax/VAT.** Enable Stripe Tax (or equivalent) before charging customers in regions that require it.
