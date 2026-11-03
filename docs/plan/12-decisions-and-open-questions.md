@@ -60,3 +60,45 @@ Why: The shipped reference product (`13-reference-implementation.md`) proves the
 Alternatives rejected: keep the v1 tool loop (more flexible, but costlier and harder to make reliable).
 Consequences: Phase 06/08/09/10/12/13/18 docs rewritten accordingly. Our own choices stay where they're stronger: the Anthropic SDK directly, pg-boss worker, structured outputs, caching layout.
 
+
+### ADR-002 — Vendor facts verified (2026-11-03; details in `15-vendor-facts.md`)
+Decision:
+- **D7 = Expo SDK 58** for the template (store Expo Go supports only 58; the published `snack-sdk` supports ≤ 54, and `main` ≤ 56).
+- **Phone preview defaults to Path B, a hosted Expo dev server**: `expo start` per active session in the sandbox service, reachable by Expo Go, with Fast Refresh on file writes. S3 verifies the exact connection mechanism; candidates are `--tunnel`, or a reverse proxy per session with `EXPO_PACKAGER_PROXY_URL`. **Path A (Snack)** is used only when a published `snack-sdk` supports the template SDK. **Path C (fallback):** open the web preview URL on the phone.
+- EAS: let EAS generate the Android keystore non-interactively (keytool + local credentials as fallback). Use `EAS_NO_VCS=1` instead of `git init`. iOS needs a distribution certificate created once (interactive or uploaded) plus an ASC API key. Set `owner` for project linking.
+- EAS Hosting: pass `--dev-domain <slug>`. Set `web.output: "single"` explicitly (SDK 58 defaults to `server`).
+- ImageKit: handle `is-intermediate-response: true`; regenerate by changing the filename; cap prompts at 200 chars. A generated image costs us ≈ $0.12, so **AI images cost 4 credits**. Free plans use placeholder images. Pro builds may include up to 8 AI images, charged 4 credits each and shown in the build estimate. Production needs a paid ImageKit plan.
+- Supabase: publishable/secret keys (not anon/service_role); store `db_pass` encrypted; the SQL endpoint is beta.
+- Anthropic: the PROJECT STATE system message goes **after** the latest user message, as the last entry.
+Why: verified primary sources (`15`).
+Consequences: Phase 11 gains Path B (+1–2 d). `06` §1/§10, `11` §3, Phases 12/13/15/16 updated.
+
+### ADR-003 — Fixes from the independent buildability review (2026-11-03)
+Decisions (each closes a review finding; phase docs follow these):
+1. **Planner history is append-only.** Each turn's PROJECT STATE message is stored in `messages.payload.api` with that turn and replayed byte-for-byte, never rebuilt or removed. No history rewriting of any kind (no image-placeholder swaps). The **full Planner tool set (all 5 tools) is defined from Phase 06**; not-yet-built tools return "not available yet" results, so the tool list never changes mid-session. Each session is stamped with `prompt_version`; a deploy that changes the prompts or tools inserts a `session_break` automatically. Render progress-update `thinking` blocks, since pre-tool prose may arrive there.
+2. **Two worker wrappers.** Single-shot jobs finish/fail the run. **Step jobs** never finish the run (only the final `advance(null)` does) and call `failRun` only on the final attempt or a non-retryable error. The stuck-run sweeper uses a per-step heartbeat (`runs.heartbeat_at`) and skips kinds waiting on external systems. On a retried `agent.chat`, emit `assistant.reset` before re-streaming.
+3. **Actor on every run.** `runs.created_by` (acting user) and `runs.billed_user_id` (project owner, who pays). Job payloads are `{runId, projectId, userId}`. Native builds and web publish are **owner-only** in v1, using the owner's Expo connection (one `eas_project_id` per project).
+4. **One theme source:** `projects.plan.themePackage {themes, activeThemeId}`. Drop the `projects.active_theme_id`/`theme_pack` columns and the `theme_switch` author. A theme switch emits `plan.updated`.
+5. **Project-scoped event stream.** `run_events` gets `project_id NOT NULL` and a nullable `run_id`. The primary SSE is `/api/projects/:id/events` (open while the workspace is open; `/api/runs/:id/events` filters it). Non-run writes (inline edits, code saves, theme switches, restores) emit `file.written {author}` / `plan.updated` on it.
+6. **Schemas built verbatim from `03`** in Phases 02/05: `credit_ledger` with `balance` + unique `reference` (signup reference `signup:<userId>`); `monthly_credits_balance`; `runs.steps`, `credits_charged`, `credits_refunded`, `step`, `lease_id`, `heartbeat_at`, `created_by`, `billed_user_id`; a `processed_webhook_events(provider, event_id) pk` table. Phase 03 uses `runs.kind = "chat"`.
+7. **Pricing mechanics:**
+   - A change round costs 5 credits for ≤ 2 regenerated files, +3 per extra file. The Planner is told the price.
+   - **Resume** = same run, automatic, never charged again. **Retry** = a new run after a refund, charging what's unbuilt.
+   - Charge flow: generate the runId → in one transaction: conditional balance `UPDATE`, ledger `charge:<runId>`, insert the run with `credits_charged`, insert a **`job_outbox`** row. A dispatcher in the worker sends outbox rows to pg-boss. This is a transactional outbox, so no cross-connection pg-boss transaction is needed.
+8. **MVP web publish** includes the Expo connect, EAS init and identity steps (Phase 15 steps 1–2 move into Phase 16's MVP scope; +1–1.5 d).
+9. **Template versioning rule:** template revisions within one SDK render from HEAD for every project and must stay backward compatible. Only SDK changes are versioned. The upgrade machinery (`upgradeProject`, banner, `template_upgrade` runs) is built in **Phase 19b**, before the first SDK bump.
+10. **S1 spike code graduates** into `preview-runtime/` (Phase 07 hardens and tests it). One fixture: sign-in + 2 tab screens + 1 stack detail screen, 4 components, 2 collections. S2 may hand-write renderers and use syntax+import validation only.
+11. **Build-time target** comes from S2's measured p50/p90 (ADR at G0). After screen 1, concurrency 2 is allowed.
+12. **Evals:** metrics rewritten for the generator pipeline. The eval set is 30 prompts with a **15-prompt held-out set**; targets are stated as counts across 2 seeds.
+13. **`update_app` semantics:** plan-guard runs at tool time on the resulting plan. Screens linking to a removed id must be in `editScreens`; tabs stay 3–5 (or the app switches to stack); `firstScreenId` can only be removed if replaced. The target plan is applied at tool time with per-screen status. A failed new screen is marked `error` (retry from canvas, credits refunded), and a failed edit keeps the old code.
+14. **Two file-write routes:** `POST /api/projects/:id/files/edits` (inline edit ops, Phase 10) and `PUT /api/projects/:id/files/content` (whole-file saves, Phase 10b). Both take `baseRevisionId`, and 409 means the base revision isn't current. The lock is based on `runs.step` + run status.
+15. **Runtime CSP** adds `font-src <runtime origin> data:` (Ionicons).
+16. **GitHub first push to an empty repo** uses the Contents API for the first commit, or creates the repo with `auto_init`, then the Git Data API.
+17. **EAS webhooks per EAS project** with a per-project secret (encrypted). Payloads are hints: re-fetch the build with the owner's token before writing. A `build_native` run ends at submit, and status lives in `native_builds`. The global `EAS_WEBHOOK_SECRET` env var is dropped.
+18. **Sandbox service:** a separate service with **no secrets and no DB access** runs untrusted-code steps (`expo export`, Playwright renders/thumbnails, the Path B dev servers). It receives work from the worker over HTTP with signed storage URLs and a per-job token. It runs as non-root with an env allowlist and restricted egress where the host allows.
+19. **Direct + RLS backends** always deploy auth and use anonymous sign-in (`owner_id = auth.uid()`); otherwise gateway mode.
+20. **Phase 19 splits** into 19a (deploy, CI, observability; 3–4 d) and 19b (data lifecycle, template-upgrade machinery, vendor watch, G4 evidence; 5–7 d).
+21. **pg-boss** is pinned to a major version (≥ 10): `createQueue()` per queue, policies explicit.
+22. **Signup credits are granted on email verification** (social sign-ins count as verified). Phase 02 adds an email sender. `signup_grants(email_hash pk)` prevents repeat grants after account deletion.
+23. **Roles:** `08` §2's matrix is authoritative. Rename = editor; builds and publish = owner. The homepage showcase needs admin approval (D17); a public link is immediate.
+24. Naming: `lib/backend` (not `lib/data`); `lib/render/*`; `lib/ai/prompts/state.ts`; `tests/e2e/`; the `screens` table is created in Phase 04 only; image MIME allowlist png/jpeg/webp/gif; `DAILY_SPEND_CAP_USD` env var.
