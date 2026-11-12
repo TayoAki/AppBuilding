@@ -61,7 +61,7 @@ Zip download and Push to GitHub aren't limited by plan. Store credits as integer
 ### 3. Ledger operations (`lib/credits/ledger.ts`)
 - `grant(userId, amount, balance, reason, reference)`: `signup_grant` (Phase 02, once per verified email), `monthly_grant`, `purchase`, `admin_adjust`.
 - `charge(userId, amount, reference)`: **one conditional `UPDATE`** on the user row. It takes `min(amount, monthly)` from `monthly_credits_balance` first and the rest from `credits_balance`, `WHERE monthly_credits_balance + credits_balance >= amount`, `RETURNING` both. Zero rows means `INSUFFICIENT_CREDITS`. In the same transaction, insert one or two ledger rows (`balance = 'monthly' | 'credits'`, references `<reference>:monthly` / `:credits`) and set `runs.credits_charged`.
-- `refund(userId, amount, reference)`: always to `credits_balance`; the unique `reference` makes it idempotent.
+- `refund(userId, amount, reference)`: to the balance(s) the charge came from, in the recorded split (monthly refunds after the period ended are dropped); the unique `reference` makes it idempotent.
 - `resetMonthly(userId, newAmount, invoiceId)`: in one transaction, a `monthly_reset` row (negative of the current monthly balance) plus a `monthly_grant` row, both referencing `invoice:<id>`.
 - Property test: each balance equals the sum of its ledger rows.
 
@@ -150,7 +150,7 @@ Keep everything that depends on the provider in `stripe.ts`.
 - [ ] A change round touching 2 files costs 5, and one touching 4 files costs 11 (unit + e2e). The Planner states the cost before applying a large change.
 - [ ] Killing the web process right after commit still dispatches the job (outbox).
 - [ ] Two tabs confirming at once can't push the balance below zero (concurrency test on the conditional `UPDATE`).
-- [ ] Pro: monthly credits are spent before never-expiring credits; renewal replaces the monthly balance; cancellation keeps Pro until period end, then zeroes monthly credits; refunds land in never-expiring credits.
+- [ ] Pro: monthly credits are spent before never-expiring credits; renewal replaces the monthly balance; cancellation keeps Pro until period end, then zeroes monthly credits; refunds return to the balance they were charged from, and a monthly refund after the period ended is dropped.
 - [ ] Free user: a 3rd project → 402 + upgrade dialog; a 6th screen via chat → the Planner says plainly it's a plan limit; App Store build → locked; web publish, zip and GitHub push work.
 - [ ] Below 5 credits the chat refuses new messages with the upgrade dialog; theme switches and inline edits still work.
 - [ ] Stripe test mode: checkout → Pro → 1,000 monthly credits posted once even if `invoice.paid` is replayed 3× (`processed_webhook_events` + reference) or arrives before `checkout.session.completed`. A non-subscription invoice grants nothing.
@@ -178,7 +178,7 @@ Implement:
    credits to message; Free 100 one-time, 2 projects, 5 screens, no native builds, no AI images; Pro 1000
    monthly spent first, unlimited projects, 10 screens, native builds, ≤8 AI images per build).
 2. costs.ts (buildCost from unbuilt screens + planned images, changeCost with the file formula),
-   ledger.ts (charge = ONE conditional UPDATE spending monthly first; refunds to never-expiring credits;
+   ledger.ts (charge = ONE conditional UPDATE spending monthly first; refunds to the balance charged, in the recorded split;
    unique reference on every row; resetMonthly). Charge flow: runId first → one transaction (UPDATE,
    ledger charge:<runId>, run row with credits_charged/created_by/billed_user_id, job_outbox row).
    gate.ts wired into the Confirm route and Planner tools AND re-checked in the worker; refunds for

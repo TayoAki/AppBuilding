@@ -9,7 +9,7 @@
 | New env vars | `DATABASE_URL` (now required), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `NEXT_PUBLIC_APP_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_LOGIN_CLIENT_ID`, `GITHUB_LOGIN_CLIENT_SECRET`, `EMAIL_FROM`, `EMAIL_PROVIDER_API_KEY` (production email provider, e.g. Resend/Postmark), `SMTP_URL` (dev: Mailpit from docker-compose) |
 
 ## Goal
-Users can sign up and sign in with email/password, Google or GitHub. Their user row carries `plan`, `credits_balance` and `monthly_credits_balance`. Email/password accounts **verify their email** (social sign-ins count as verified), and the signup grant is recorded as a `signup_grant` ledger entry **on verification**, once per email address ever. Submitting a prompt while signed out opens the auth dialog, **remembers the prompt (and attachments)**, and continues after sign-in. Authorization helpers (`requireUser`, `requireProjectAccess`) are created now, so every later route uses them from its first line.
+Users can sign up and sign in with email/password, Google or GitHub. Their user row carries `plan`, `credits_balance` and `monthly_credits_balance`. Email/password accounts **verify their email** (a social sign-in counts as verified only when the provider asserts a verified email), and the signup grant is recorded as a `signup_grant` ledger entry **on verification**, once per email address ever. Submitting a prompt while signed out opens the auth dialog, **remembers the prompt (and attachments)**, and continues after sign-in. Authorization helpers (`requireUser`, `requireProjectAccess`) are created now, so every later route uses them from its first line.
 
 ## What we do differently from the video (and why)
 - **Self-hosted Better Auth on our own Postgres, against any provider.** The video swaps Better Auth for CloudHike's hosted auth service. We keep auth in our app (one less vendor dependency), and the DB is just a `DATABASE_URL`: local Docker, Neon, Railway, Supabase or CloudHike Postgres all work.
@@ -52,7 +52,7 @@ Users can sign up and sign in with email/password, Google or GitHub. Their user 
 ### 6. Wire the dialog (from Phase 01)
 - Email/password forms with Zod validation and inline errors (wrong password, email taken, weak password).
 - Google / GitHub buttons call `signIn.social({ provider, callbackURL })`. `callbackURL` = current path plus `?resume=1`.
-- Header: when signed in, show an avatar menu (name, credits pill, "My projects", "Sign out") instead of the buttons. Unverified email users see a "Verify your email to get 100 free credits" banner with Resend.
+- Header: when signed in, show an avatar menu (name, credits pill, "My projects", "Sign out") instead of the buttons. Someone who signed up but hasn't verified sees "Verify your email to get 100 free credits" with Resend in the sign-in dialog, since unverified accounts can't sign in.
 
 ### 7. Pending prompt across sign-in
 - `lib/pending-prompt.ts`: on a signed-out submit, save `{prompt, platforms}` to `sessionStorage`. Save attachments to **IndexedDB** (Files survive an OAuth redirect there; they don't in memory). Then open the dialog.

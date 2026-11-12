@@ -65,7 +65,7 @@ The video hid the engineering inside these prompts. Reading them, we changed the
 | Background work | CloudHike Jobs calling back to a public URL (needs ngrok locally; planning still in the request process; build "shows as building" if nobody watches) | pg-boss + own worker pulling from Postgres | No tunnel, no inbound webhook, builds progress whether or not anyone is watching |
 | Planner prompt | Whole system prompt rebuilt per message | Static cached system + state as a mid-conversation system message | Caching |
 | JSON generators | "Reply with ONLY JSON" | Structured outputs (`messages.parse`) | No parse failures |
-| Build status (EAS) | Polled only while the dialog is open (no webhook; undocumented GraphQL API for workflows) | `eas-cli` in the worker + EAS webhooks; polling as fallback | Progress without an open tab; documented interfaces first |
+| Build status (EAS) | Polled only while the dialog is open (no webhook; undocumented GraphQL API for workflows) | `eas-cli` in the runner service (`08` §5) + EAS webhooks; polling as fallback | Progress without an open tab; documented interfaces first |
 | Sharing | View-only, existing accounts only, all mutations owner-only | Viewer/editor roles with email invites | Collaboration. v1 may ship view-only (it's simpler) |
 | Card previews | Live sandboxed apps per card | Static thumbnails by default; live on hover/open | Home page performance (either is acceptable) |
 | Default model | `claude-sonnet-5-5` for all agents | `claude-opus-5-5` default; Sonnet 5.5 via `AI_BUILDER_MODEL` if evals hold (D9) | Your call; the reference app is evidence that Sonnet 5.5 is good enough |

@@ -59,7 +59,7 @@ foundation → components → screen:<referenceScreenId> → screen:<rest, in pl
 ### 4. Foundation step
 - Schema `FoundationSchema = { themes: Theme[5], collections: Collection[] }` (base tokens per theme; `Collection` per `06` §6).
 - Request: app name, tagline, summary, target users, confirmed design, screens with purposes and key elements.
-- Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names (collection and field names match `^[a-z][a-zA-Z0-9]{0,40}$` and aren't SQL reserved words; `typeName` is a PascalCase identifier; `08` §6), `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again").
+- Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names (collection and field names match `^[a-z][a-zA-Z0-9]{0,40}$` and aren't SQL reserved words; `typeName` is a PascalCase identifier; `08` §6), `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again"). The renderers that turn this JSON into `theme/themes.ts`, `data/schema.ts` and `data/seed.ts` emit every string through `JSON.stringify` and every identifier through the name check; nothing from the model is spliced into source as raw text (`08` §6).
 - Then the platform: `deriveThemePackage()` (full tokens + contrast + tinted neutrals) → `projects.plan.themePackage = {themes, activeThemeId: themes[0].id}`, `projects.plan.collections = …` → re-render `theme/themes.ts`, `data/schema.ts`, `data/seed.ts` → emit `theme.ready`, `plan.updated`.
 - Images (ADR-002, `11` §3): **Free projects always use placeholder URLs.** When `IMAGEKIT_ENABLED` and the project owner is on Pro, image fields may use generation URLs: at most 8 per build across all steps, each charged 4 credits and included in the build estimate (Phase 18). The wait-and-store post-processing is Phase 12; until then everything uses placeholders.
 
@@ -118,7 +118,7 @@ lib/validate/{index.ts,syntax.ts,imports.ts,theme.ts,data.ts,routes.ts,markup.ts
 lib/theme/derive.ts                        (from Phase 07; + newTheme path)
 worker/handlers/agent-step.ts              (real dispatcher)
 worker/agent/{foundation.ts,components.ts,screen.ts,finish.ts,smoke.ts}
-preview-runtime/harness.html               (from Phase 07)
+sandbox/static/harness.html                (from Phase 07; sandbox image only)
 sandbox/{index.ts,render.ts,auth.ts,Dockerfile}   (sandbox service skeleton: /render; reused by Phases 11, 16, 17)
 lib/sandbox/client.ts                      (worker → sandbox: signed URL + per-job token)
 app/api/projects/[projectId]/theme/route.ts

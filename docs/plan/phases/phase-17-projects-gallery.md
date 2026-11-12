@@ -51,7 +51,7 @@ Replace the home-page placeholder grid with real data. Signed-in users see **the
 | Open | member | `/workspace/:id` |
 | Open in new tab | member | same, `target=_blank` |
 | Rename | editor+ | inline dialog → `PATCH /api/projects/:id { title }` |
-| Duplicate | editor+ (or any verified signed-in user, for a public/unlisted project that isn't deleted: "Remix") | `POST /api/projects/:id/duplicate` → **409 while a run is active**; otherwise a new project owned by the caller: `projects.plan` (minus `backend`), screens and files copied from the latest snapshot, `visibility = private`, no backend/GitHub/builds/web deployment/members copied. **Members** also get the chat's display text; **`messages.payload.api` is never copied**, and the copy's first Planner turn starts a new session. **Remix copies no messages and no `reference_image` / `chat_attachment` assets** (`08` §2), so the author's prompts stay private and can't steer the remixer's agent |
+| Duplicate | editor+ (or any verified signed-in user, for a public/unlisted project that isn't deleted: "Remix") | `POST /api/projects/:id/duplicate` → **409 while a run is active**; otherwise a new project owned by the caller: `projects.plan` (minus `backend`), screens and files copied from the latest snapshot (for a Remix: the snapshot the public endpoint is serving, i.e. the last one that passed the secret scan), `visibility = private`, no backend/GitHub/builds/web deployment/members copied. **Members** also get the chat's display text; **`messages.payload.api` is never copied**, and the copy's first Planner turn starts a new session. **Remix copies no messages and no `reference_image` / `chat_attachment` assets** (`08` §2), so the author's prompts stay private and can't steer the remixer's agent |
 | Share | owner | opens the Phase 14 share dialog |
 | Make unlisted / private | owner | `PATCH visibility`; immediate. Unlisted shows a confirmation that code + preview become visible to anyone with the link |
 | Show on homepage | owner | `PATCH visibility = public` → `showcase_status = pending`. Listed only after an admin approves at `/admin/showcase`; unpublish anytime |
@@ -67,7 +67,7 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 - SEO: `generateMetadata` with title/description and the thumbnail as the OG image.
 
 ### 5b. Showcase approval queue (admin)
-- `/admin/showcase` (admin role from `user.role = 'admin'`) lists `showcase_status = pending` projects with their public page, secret-scan result and the owner. **Approve** / **Reject** (with a reason emailed to the owner) / **Unlist** later. A "Report" link on public pages (rate-limited per IP) adds an entry to the admin queue. It never changes `showcase_status` by itself; only an admin action does.
+- `/admin/showcase` (admin role from `user.role = 'admin'`, granted only by `scripts/grant-admin.ts`; admin routes need a recent re-auth and write an audit row, `08` §2) lists `showcase_status = pending` projects with their public page, secret-scan result and the owner. **Approve** / **Reject** (with a reason emailed to the owner) / **Unlist** later. A "Report" link on public pages (rate-limited per IP) adds an entry to the admin queue. It never changes `showcase_status` by itself; only an admin action does.
 
 ### 6. Authz
 - All mutations go through `requireProjectAccess(projectId, role)`.
@@ -75,7 +75,7 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 - The public page loads files via a separate read-only endpoint that checks `visibility in ('public','unlisted')` **and `deleted_at is null`** and serves the **latest snapshot**, not in-progress revisions.
 
 ## Files to create / change
-- `worker/handlers/thumbnail-render.ts`, `preview-runtime/harness.html` (shared with the smoke test)
+- `worker/handlers/thumbnail-render.ts`, `sandbox/static/harness.html` (shared with the smoke test; sandbox image only)
 - `lib/db/queries/projects.ts`
 - `app/(marketing)/page.tsx` (grid sections), `components/home/{ProjectGrid.tsx,ProjectCard.tsx,ProjectCardMenu.tsx,ShowcaseGrid.tsx}`
 - `app/p/[projectId]/page.tsx`, `components/public/{PublicPreview.tsx,PublicCodeView.tsx}`
@@ -97,7 +97,7 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 | GET | `/api/public/projects/:id` | none (public/unlisted only) | → `{ title, description, screens[], thumbnailUrl }` |
 | GET | `/api/public/projects/:id/files` | none (public/unlisted only) | → `{ files: {path, sha, content}[] }` from latest snapshot, materialized with `plan.backend` removed |
 | PATCH | `/api/projects/:id` | editor (title) / owner (visibility) | `{ title?, visibility? }` → project (`visibility = public` sets `showcase_status = pending`) |
-| POST | `/api/admin/showcase/:id/{approve,reject,unlist}` | admin | `{ reason? }` → `{ showcase_status }` |
+| POST | `/api/admin/showcase/:id/{approve,reject,unlist}` | admin + recent re-auth, audit-logged | `{ reason? }` → `{ showcase_status }` |
 | POST | `/api/projects/:id/duplicate` | editor+ on the source, or any verified user when the source is public/unlisted and not deleted (Remix) + plan limit | → `{ projectId }` |
 | DELETE | `/api/projects/:id` | owner | → `{ ok }` (soft) |
 
@@ -109,7 +109,7 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 - [ ] Duplicate and delete return 409 while a run is active; the delete dialog names the website, repo and backend that remain.
 - [ ] The thumbnail updates within ~1 min after a build/edit/theme change.
 - [ ] Rename, duplicate, share, visibility toggle, zip export and delete all work from the card menu, with correct role restrictions (tests for viewer/editor/owner/non-member).
-- [ ] Duplicate copies files only (no backend, GitHub, builds, members); the new project opens and renders.
+- [ ] Duplicate copies files, plus chat display text for members only (no backend, GitHub, builds, members, `payload.api`); the new project opens and renders.
 - [ ] Remix by a non-member copies no messages and no uploaded assets; `messages.payload.api` is never copied or sent to a client (test both).
 - [ ] A soft-deleted public project returns 404 on the public page, the files endpoint and Remix.
 - [ ] The public page preview runs on seed data even when the source project has a connected backend (test asserts `plan.backend` is stripped and `lib/backend/config.ts` selects the local provider); visitor data lives under `demo:<projectId>`.

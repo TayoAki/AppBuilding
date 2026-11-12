@@ -44,7 +44,9 @@ After the first build, the user keeps working in chat. They can ask questions, c
 
 Failures return a short tool error that the Planner relays plainly. It never claims the work happened.
 
-On success, in **one transaction** (the same shape Phase 18 fills in with the charge):
+**Above the auto-apply threshold** (cost over 11 credits, or any added screen; `05` §3.3): store the normalized `AppChange` with its hash, show a cost card, and return "Waiting for the person to confirm". The steps below then run from `POST /api/projects/:id/changes/:hash/confirm`, not from the tool.
+
+On success (small change, or after the click), in **one transaction** (the same shape Phase 18 fills in with the charge):
 - apply the **target plan at tool time**: `projects.plan.screens` becomes the resulting list, with per-screen status `building` (added/edited) or `removing`, and `projects.plan.pendingChanges` holds the diff;
 - create `runs(kind = change, created_by = actor, billed_user_id = owner)`;
 - `enqueue(tx, "agent.step", {runId, projectId, userId, step: <first change step>})` via the outbox.

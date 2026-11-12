@@ -135,7 +135,7 @@ Post-deploy smoke test (Playwright against prod, test account):
 Rollback: Vercel instant rollback to the previous deployment; worker and sandbox redeploy the previous image tags. Migrations are forward-only (expand/contract), so old code keeps working on the new schema. Document this in `docs/runbook.md`.
 
 ## Files to create / change
-- `worker/Dockerfile`, `sandbox/Dockerfile`, host config (`railway.json` / `fly.toml` / `render.yaml`)
+- `worker/Dockerfile`, `sandbox/Dockerfile`, `runner/Dockerfile`, host config (`railway.json` / `fly.toml` / `render.yaml`)
 - `.github/workflows/{ci.yml,release.yml}` (lint/typecheck/test on PR; migrate + deploy on `main`)
 - `lib/env.ts` (per-process schemas incl. the sandbox allowlist), `.env.example`
 - `lib/observability/{logger.ts,sentry.ts}`, `sentry.*.config.ts`
@@ -177,8 +177,8 @@ Read first:
 - docs/plan/12-decisions-and-open-questions.md (hosts I picked; ADR-003 #17, #18, #21)
 
 Implement the code/config side (I will click through provider dashboards myself):
-1. worker/Dockerfile (Node only) and sandbox/Dockerfile (Node 22, pinned eas-cli, Playwright Chromium,
-   prebuilt template node_modules, non-root) + host config for <FILL IN: Railway | Fly | Render>.
+1. worker/Dockerfile (Node only), sandbox/Dockerfile (Node 22, Playwright Chromium, prebuilt template
+   node_modules, non-root, no eas-cli) and runner/Dockerfile (Node 22, pinned eas-cli, one container per job) + host config for <FILL IN: Railway | Fly | Render>.
 2. CI: lint/typecheck/test on PRs; on main: drizzle-kit migrate, then deploy web + worker + sandbox.
 3. lib/env.ts per-process schemas (web, worker, sandbox, runner); the sandbox and runner schemas reject
    unexpected secret-looking vars; assert the preview domains are not same-site with the app; CI check against .env.example. DATABASE_URL_DIRECT for pg-boss/outbox/LISTEN.

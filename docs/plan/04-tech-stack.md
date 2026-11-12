@@ -87,7 +87,8 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | `BACKEND_PROVIDER` | web, worker | 13 | — | e.g. `supabase` \| `cloudhike` |
 | `BACKEND_OAUTH_CLIENT_ID` / `BACKEND_OAUTH_CLIENT_SECRET` | web | 13 | ✅ | The platform's developer app at the backend provider |
 | `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` / `GITHUB_APP_PRIVATE_KEY` | web, worker | 14 | ✅ | Export GitHub App |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` / `STRIPE_PRICE_PRO_MONTHLY` | web | 18 | ✅ | |
+| `STRIPE_SECRET_KEY` | web, worker | 18 | ✅ | the worker re-reads subscriptions and cancels on account deletion |
+| `STRIPE_WEBHOOK_SECRET` / `STRIPE_PRICE_PRO_MONTHLY` | web | 18 | ✅ | |
 | `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | 18 | — | |
 | `CREDIT_USD_VALUE` / `CREDIT_MARKUP` | web, worker | 18 | — | only for the optional cost-based credit mode (`11` §3); default flat pricing ignores them |
 | `PUBLISH_HOSTING_PROVIDER` | worker | 16 | — | optional; default `eas` |
@@ -107,6 +108,7 @@ Scripts (`package.json`):
 - `dev`: Next.js
 - `worker`: `tsx watch worker/index.ts`
 - `sandbox`: `tsx watch sandbox/server.ts` (local stand-in for the sandbox service; same no-secrets env allowlist)
+- `runner`: `tsx watch runner/server.ts` (local stand-in for the runner service, from Phase 16)
 - `db:generate` / `db:migrate` / `db:push` / `db:studio`
 - `preview-runtime:build`: esbuild bundle of `preview-runtime/`
 - `test`, `test:e2e`, `eval`: agent eval suite

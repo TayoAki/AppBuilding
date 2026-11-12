@@ -6,7 +6,7 @@
 | Branch | `feat/16-web-publish` |
 | Depends on | Phase 05 (jobs, outbox, project stream), Phase 08 (materialize, sandbox service), Phase 14 (secret scanner). **Self-sufficient for the MVP:** it builds the Expo connect, EAS project init and identity steps that Phase 15 reuses later (ADR-003 #8) |
 | Effort (solo dev + Claude Code) | ~4–4.5 days (includes ~1–1.5 d of Expo connect, EAS init and identity moved here from Phase 15) |
-| New env vars | none (uses the owner's Expo token); optional `PUBLISH_HOSTING_PROVIDER` (default `eas`) |
+| New env vars | `RUNNER_URL` (worker → runner service, `08` §5; the owner's Expo token is passed per job); optional `PUBLISH_HOSTING_PROVIDER` (default `eas`) |
 
 ## Goal
 **Publish → Web** turns the generated Expo app into a website, using react-native-web via `expo export -p web`, and deploys it to a public URL anyone can open and share. Republishing updates the same URL, and a failed update leaves the previous version online. The deploy runs in the background and its progress stays visible after the dialog is closed. The live URL also appears in the App Preview tab. Web publishing is available on every plan, and **only the project owner** can publish (`08` §2, ADR-003 #3).
@@ -105,7 +105,7 @@ export interface HostingProvider {
 | GET/PATCH | `/api/projects/:id/identity` | viewer / owner | → `{ slug, androidPackage, bundleId, locked }` / edit before lock |
 | POST | `/api/projects/:id/publish/web` | **owner** | `{}` → `{ runId }` |
 | GET | `/api/projects/:id/publish/web` | viewer | → `{ live: {url, publishedAt, snapshotId} \| null, latestAttempt, history }` |
-| POST | `/api/projects/:id/publish/web/:deploymentId/promote` | owner | → `{ url }` |
+| POST | `/api/projects/:id/publish/web/:deploymentId/promote` | owner | → `{ url }`; 404 unless the deployment belongs to this project |
 
 ## Acceptance checklist
 - [ ] On a fresh test Expo account: connect → first publish sets the identity, inits the EAS project and deploys to `https://<slug>.expo.app`, with no interactive prompts.

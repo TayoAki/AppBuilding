@@ -61,7 +61,7 @@ Mechanics (Phase 18):
   4. insert the `job_outbox` row.
   The worker's dispatcher sends the outbox row to pg-boss after commit. Two tabs can't overspend, and a crash can't leave a charge without a run or a run without a job. Tools pre-check only so the Planner can explain a refusal; the charge decides.
 - **Resume vs retry.** *Resume* is the same run continuing after a crash or redelivery: automatic and **never charged again**. *Retry* is a **new run** the person starts after a failure. The failed run has already refunded what it didn't build, and the retry charges what's still unbuilt.
-- **Refunds** are computed from `runs.steps` (what didn't get built), into `credits_balance`, each with a unique ledger reference (`refund:<runId>:<screenId>`), so a retried step can't refund twice. Images that fell back to placeholders are refunded the same way.
+- **Refunds** are computed from `runs.steps` (what didn't get built), back to the balance the charge came from, each with a unique ledger reference (`refund:<runId>:<screenId>`), so a retried step can't refund twice. Images that fell back to placeholders are refunded the same way.
 - `ai_usage` still records real cost per run, so margins are visible per action type (dashboard in Phase 19).
 
 Why flat rather than cost-based: people can predict it ("4 screens = 40 credits"). Cost-based pricing (`credits = ceil(cost × CREDIT_MARKUP / CREDIT_USD_VALUE)`) stays available as a config option if margins drift.

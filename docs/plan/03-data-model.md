@@ -8,7 +8,7 @@ Conventions:
 - Every table has `created_at timestamptz default now()`. Mutable tables also get `updated_at`.
 - Soft delete where users can delete things (`deleted_at`).
 - Money is stored as integer **micro-credits**, never floats (see §8).
-- Encrypted columns end in `_enc` and hold `v1:<iv>:<ciphertext>:<tag>` strings produced by `lib/crypto/encrypt.ts`.
+- Encrypted columns end in `_enc` and hold `v1:<iv>:<ciphertext>:<tag>` strings produced by `lib/crypto/encrypt.ts`, with `"{table}.{column}:{rowId}"` as the GCM additional data, so a ciphertext moved to another row or column fails to decrypt (`08` §3).
 
 ---
 
@@ -193,8 +193,8 @@ Unique (user_id, provider).
 | `project_id` pk | `provider` | `mode` (`direct` = provider client + RLS with auth always deployed and anonymous sign-in · `gateway` = platform `/api/apps/[id]/…`) | `external_project_id` | `public_config` jsonb (URL + **publishable** key: safe to ship in the app) | `secret_config_enc` (secret/service keys and `db_pass`: never shipped) | `install_token_secret_enc` (gateway mode: per-project key that signs install tokens) | `external_org_id` (the provider organization the owner chose) | `confirmed_shared` text[] (collections the owner confirmed as readable by all app users) | `services` jsonb (`[{type, status}]`) | `schema_version` int | `status` (`connecting` · `provisioning` · `ready` · `failed` · `reconnect_required`) | `error` |
 
 ### `device_sessions` (Phase 11, Path B)
-| `id` | `project_id` | `started_by` | `mode` (`devserver` \| `snack`) | `sandbox_instance` | `url` (exp:// URL shown as QR; unguessable) | `status` (`starting` · `ready` · `stopped` · `failed`) | `clients` jsonb (if the dev server reports them) | `last_activity_at` | `error` |
-One live session per project; idle-stopped after 15 minutes without a connected client (`08` §5).
+| `id` | `project_id` | `user_id` (who started it) | `mode` (`devserver` \| `snack`) | `sandbox_instance` | `url` (exp:// URL shown as QR; unguessable) | `status` (`starting` · `ready` · `stopped` · `failed`) | `clients` jsonb (if the dev server reports them) | `last_activity_at` | `error` |
+One live session per user per project (per-user caps in Phase 11); stopped after 5 minutes with no workspace heartbeat and no connected device (`08` §5). The `url` is returned only to the session's own user and never appears in `run_events`.
 
 ### `project_github_repos` (Phase 14)
 | `project_id` pk | `owner` | `repo` | `default_branch` | `last_pushed_snapshot_id` | `last_commit_sha` |
@@ -220,7 +220,7 @@ One row per Anthropic API response. Written from Phase 06 on, even before billin
 
 ### `credit_ledger`
 Append-only. Each balance equals the sum of its own rows: `credits_balance = sum(amount where balance='credits')`, `monthly_credits_balance = sum(amount where balance='monthly')`.
-| `id` | `user_id` | `amount` bigint (±micro-credits) | `balance` (`credits` \| `monthly`) | `reason` (`signup_grant`, `monthly_grant`, `monthly_reset`, `charge`, `refund`, `purchase`, `admin_adjust`) | `run_id` null | `reference` text **unique** (idempotency: `signup:<userId>`, `charge:<runId>`, `refund:<runId>:<screenId>`, `invoice:<stripeInvoiceId>`, `monthly_reset:<subscriptionId>:<periodEnd>`) |
+| `id` | `user_id` | `amount` bigint (±micro-credits) | `balance` (`credits` \| `monthly`) | `reason` (`signup_grant`, `monthly_grant`, `monthly_reset`, `charge`, `refund`, `clawback`, `purchase`, `admin_adjust`) | `run_id` null | `reference` text **unique** (idempotency: `signup:<userId>`, `charge:build:<planMessageId>`, `charge:<runId>`, `charge:<runId>:images`, `clawback:<invoiceId>`, `refund:<runId>:<screenId>`, `invoice:<stripeInvoiceId>`, `monthly_reset:<subscriptionId>:<periodEnd>`) |
 
 ### `processed_webhook_events`
 | `provider` (`stripe` · `eas` · …) | `event_id` | `processed_at` | (pk `provider, event_id`)

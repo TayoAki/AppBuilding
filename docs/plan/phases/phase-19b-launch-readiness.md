@@ -105,7 +105,7 @@ docs/launch/g4-evidence.md (filled in for the launch PR)
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
 | POST | `/api/account/delete` | session + recent re-auth | → `{ runId }` |
-| POST | `/api/account/export` | session | → `{ runId }` (link emailed) |
+| POST | `/api/account/export` | session | → `{ runId }` (ready notice emailed; download from Settings, authorized by `runs.created_by`) |
 | POST | `/api/projects/:id/template-upgrade` | owner | `{ to, dryRun }` → `{ runId }` → `{ ok, notes[], failures[] }` in `runs.output` |
 | POST | `/api/projects/:id/template-upgrade/undo` | owner | → `{ snapshotId }` |
 

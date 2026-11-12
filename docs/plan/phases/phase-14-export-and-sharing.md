@@ -61,11 +61,11 @@ Worker `export-github.ts`:
 - Handle a non-fast-forward or deleted repo: re-fetch the head and retry once; if the repo is gone, clear `project_github_repos` and ask the user to pick again.
 
 ### 7. Sharing
-**7a (v1 minimum, reference-app parity):** view-only sharing with existing accounts. The owner enters an email. If it resolves to an existing user **with a verified email**, a `project_members` row with `role = viewer` is created; otherwise nothing is created. The response is the same in both cases ("If that person has an AppBuilding account, they now have access"), so the form can't be used to test which emails have accounts. All mutating routes stay owner-only.
+**7a (v1 minimum, reference-app parity):** view-only sharing with existing accounts. The owner enters an email. A pending `project_members` row with `role = viewer` is created and an invite email is sent, whether or not that address has an account; the list shows "Invited" until the person accepts while signed in with that **verified** email. The owner therefore can't tell from the form or the list which emails have accounts (`08` §2). All mutating routes stay owner-only.
 
 **7b (full plan):**
 - Share dialog (from the Export menu, matching the video's placement): email input + role select (viewer/editor) → `POST /api/projects/:id/members`.
-- If the email belongs to an existing user **whose email is verified** → immediate access; otherwise (no account, or an unverified one) create a pending `project_members` row and send an invite email with an accept link (`/invite/:token`). The UI answer is "Invite sent" either way. The token is 32 random bytes, stored hashed, valid 7 days, single-use, bound to the invited email and role, and void if the invite is removed or its role changes. Accepting requires a session whose **verified** email equals the invited one; it binds `user_id` and sets `accepted_at`. Access checks use `user_id`, never the email column (`08` §2).
+- Every share creates a pending `project_members` row and sends an invite email with an accept link (`/invite/:token`); a verified existing user also sees it under "Invitations" in the app. The UI answer is "Invite sent" and the member list shows "Invited" until acceptance, with or without an existing account. The token is 32 random bytes, stored hashed, valid 7 days, single-use, bound to the invited email and role, and void if the invite is removed or its role changes. Accepting requires a session whose **verified** email equals the invited one; it binds `user_id` and sets `accepted_at`. Access checks use `user_id`, never the email column (`08` §2). **Removing a member or lowering a role** also stops that member's device sessions on the project and invalidates their preview links, in the same transaction.
 - "Copy project link" → `/workspace/:id`. Access always requires membership. A public/unlisted project has its own read-only page at `/p/:id` (Phase 17); visibility never opens the workspace.
 - Member list with role change/remove (owner only).
 - Update `requireProjectAccess()` to consult `project_members` (viewer < editor < owner).
@@ -109,10 +109,10 @@ Worker `export-github.ts`:
 - [ ] Connect GitHub → create repo with an invalid name shows inline validation; valid name creates the repo.
 - [ ] Pushing to a new empty repo (created outside AppBuilding with no commits, **and** one created by AppBuilding with `auto_init`) lands on the default branch with all files, with no 409 from the Git Data API. A second push after a theme change creates `appbuilding/update-*` and a PR with only changed files. A first push into an existing non-empty repo also goes to a new branch (the default branch is untouched).
 - [ ] GitHub tokens are stored encrypted; disconnecting GitHub deletes them.
-- [ ] Share by email: existing user gets access immediately; a new email gets an invite that works only for that email; expired tokens are rejected.
+- [ ] Share by email: every share is a pending invite that works only for that verified email; the response and the member list look the same whether or not the account exists; expired, reused and revoked tokens are rejected; an unverified account with that address gets no access.
 - [ ] Viewer can open the workspace read-only (chat input, inline edit, zip export and GitHub push disabled, per the `08` §2 matrix); non-member gets 404 on every project route.
 - [ ] Every export run records `created_by` (acting user) and `billed_user_id` (owner).
-- [ ] Download URLs expire and are only issued to project members.
+- [ ] Download URLs expire and are only issued to editors and owners of the project.
 
 ## Claude Code prompt
 ```text

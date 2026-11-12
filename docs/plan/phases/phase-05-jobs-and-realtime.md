@@ -212,8 +212,8 @@ drizzle/000N_runs_events_outbox.sql
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | GET | `/api/projects/:projectId/events` | viewer | SSE, primary; `Last-Event-ID` / `?after=`; ~4 min then reconnect |
-| GET | `/api/runs/:runId/events` | viewer (via project) | SSE filtered to one run; closes on terminal event |
-| POST | `/api/runs/:runId/cancel` | editor | → `202` |
+| GET | `/api/runs/:runId/events` | viewer (via project); for account-level runs with no project, `runs.created_by` = session user | SSE filtered to one run; closes on terminal event |
+| POST | `/api/runs/:runId/cancel` | editor (account-level runs: `created_by`) | → `202` |
 | GET | `/api/projects/:projectId/runs/active` | viewer | → `{run | null}` |
 | POST | `/api/dev/echo` | user, dev only | `?chain=1`, `?failOnce=1` → `{runId}` |
 

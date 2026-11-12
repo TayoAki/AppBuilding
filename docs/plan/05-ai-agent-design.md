@@ -99,7 +99,7 @@ Mid-conversation system messages are supported on Opus 5.5 without a beta header
 2. **What to act on.** Do only what the latest message asks. Earlier messages are background and already handled. **The current plan is the truth** about what exists. The chat may start mid-project (finished requests drop out; "Start new session" clears history), so rely on state. The reference app hit this bug: the agent re-added screens requested earlier in the chat.
 3. **Changing a built app.** One `update_app` call per message. Change as little as possible. Prefer `editComponents` when the request is about something a shared component draws. Every new screen must be reachable: add it to some screen's `navigatesTo` and edit that screen, or give it a `tab`. Welcome, onboarding and sign-in screens become `firstScreenId` and link onward. Use `dataChange` for new data needs. Whole-app colors and looks go to `set_theme`. Don't repeat old replies saying "changes aren't available".
 4. **Selected element.** A message may start with `<selected-element file line label screen>…code…</selected-element>`. The workspace adds it; the person didn't write it. "This", "it" and "the button" mean that element. Change only it, through `editComponents` if `file` is a component, otherwise through `editScreens`. Copy file, line and code into `request`. Exact colors become a literal hex for that element. Never mention the block, file or line to the person.
-5. **Backend.** The connected provider is the app's backend, billed to the person's own account. If it isn't connected, tell them to click **Connect Backend**; never ask for keys. `setup_backend` deploys what the screens need, and you name what you're deploying first. Classify collections as `shared` (catalog, public feed) or private. Explain failures plainly, never showing credentials.
+5. **Backend.** The connected provider is the app's backend, billed to the person's own account. If it isn't connected, tell them to click **Connect Backend**; never ask for keys. `setup_backend` proposes what the screens need, and you name what you're proposing first; the owner confirms it in the setup dialog, and nothing is deployed or made public from chat. Suggest which collections look `shared` (catalog, public feed); they stay private until the owner confirms. Explain failures plainly, never showing credentials.
 6. **Planning rules.**
    - At most `screenTarget` screens, where `screenTarget = max(min(MAX_SCREENS_DEFAULT, planMax − 1), 1)`. Fold extras into modals and sections. Go above it only when the person explicitly asks, up to `planMax`.
    - **Add a default Sign In screen** (id `sign-in`, first, sign-in and sign-up toggle, never a tab) for any app with personal data. It doesn't count toward `screenTarget`. Skip it for simple tools (calculator, timer).
@@ -165,7 +165,7 @@ Collections, themes and components are **not** in the plan the Planner writes. T
 
 **Semantics (ADR-003 #13):**
 - At tool time, the server builds the **resulting plan** and runs plan-guard on it before accepting. Any screen whose `navigatesTo` includes a removed id must be in `editScreens`. Tabs stay within 3–5, or the change must switch `navigation` to `stack`. `firstScreenId` can be removed only if the same call replaces it. A violation returns a tool error, and the Planner retries.
-- On success, the target plan is applied to `projects.plan` immediately. Added screens get status `planned`, edited ones keep `ready` until their new code passes. PROJECT STATE and layouts then reflect the intent.
+- On success (a small change, or after the cost-card click for a larger one, §3.3), the target plan is applied to `projects.plan` immediately. Added screens get status `planned`, edited ones keep `ready` until their new code passes. PROJECT STATE and layouts then reflect the intent.
 - A new screen that fails generation after its repair round is marked `error`. It shows on the canvas with **Retry**, and its credits are refunded. Layouts link only to screens whose status is `ready`. A failed edit keeps the old code and reports what couldn't be done. Removed screens are deleted when the run finishes successfully.
 - Price: 5 credits for a round touching ≤ 2 regenerated files, +3 per extra file, +10 per new screen (`11` §3). The tool result tells the Planner the charge, so it can say it.
 
@@ -278,7 +278,7 @@ All events go to the project stream (`/api/projects/:id/events`, ADR-003 #5). `r
 | `upgrade` | `{reason}` (plan limit reached; opens the upgrade dialog, Phase 18) | either |
 | `backend.status` | `{state, services[]}` | either |
 | `export.progress` / `build.status` / `publish.step` | `{runId, step, status, url?}` (Phases 14–16) | run |
-| `device.status` | `{mode: "devserver" \| "snack", state, url?, clients?}` (Phase 11) | either |
+| `device.ready` / `device.status` | `{sessionId, mode: "devserver" \| "snack", state, clients?}` (Phase 11). Never the session URL: events are persisted and readable by every viewer (`08` §2) | either |
 | `run.error` / `run.done` | `{code, message, retryable}` / `{summaryMessageId, snapshotId}` | run |
 
 File contents never travel in events; clients fetch them by revision id.

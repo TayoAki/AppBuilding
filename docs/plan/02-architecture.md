@@ -47,7 +47,7 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 │  ├─ outbox dispatcher → pg-boss                                  │
 │  ├─ agent.chat (Planner) / agent.step (generators) → Anthropic   │
 │  ├─ export.github     → GitHub API (Contents + Git Data API)     │
-│  ├─ build.native      → EAS Build (owner's Expo token)           │
+│  ├─ build.native      → runner: EAS Build (owner's Expo token)   │
 │  ├─ publish.web       → sandbox export → runner: EAS deploy      │
 │  ├─ backend.provision → backend provider API (per generated app) │
 │  └─ device.session    → asks the sandbox for a dev server        │
@@ -108,7 +108,7 @@ Worker: agent.chat (Planner, see 05 §3)
   → server validates + caps plan → plan_card message → projects.plan (draft) → plan.ready
 User: "only first 3 screens" → POST /api/projects/:id/messages → agent.chat → propose_plan again
 User: [Confirm & build]  ("looks good" → confirm_plan only highlights the button; the click starts the build)
-  → one txn: charge credits (ledger charge:<runId>) + run(kind=build, credits_charged)
+  → one txn: charge credits (ledger charge:build:<planMessageId>) + run(kind=build, credits_charged)
              + job_outbox "agent.step" {runId, projectId, userId, step:"foundation"}
 Worker: agent.step chain (one job per step, each enqueues the next; 05 §4)
   1. foundation   → JSON: 5 themes + collections → platform writes theme/themes.ts, data/schema.ts, data/seed.ts
