@@ -68,7 +68,7 @@ Pure functions `(source, target, op) → newSource`, unit-tested.
 
 ### 5. Persist: splice edits into the base (`POST /api/projects/:id/files/edits`)
 - The client keeps, per file, `{ baseRevisionId, edits: [{afid, op}] }` for edits since the frames last compiled.
-- Debounced at 400 ms, it sends **all** pending edits for that file with `baseRevisionId` (the revision the frames compiled) and `expectedHeadRevisionId` (the latest revision this client knows: the base, or its own last saved `user_inline` revision). The server re-applies the full list to the base revision's source (deterministic). It re-parses (must succeed) and runs the syntax, import and theme validators: literals are allowed because they're person-chosen, and **R10** keeps them on later AI edits. Then it writes a new revision with `author: "user_inline"`.
+- Debounced at 400 ms, it sends **all** pending edits for that file with `baseRevisionId` (the revision the frames compiled) and `expectedHeadRevisionId` (the latest revision this client knows: the base, or its own last saved `user_inline` revision). The server loads `baseRevisionId` with `project_id = :id` and the request's file path (404 otherwise, `08` §2), then re-applies the full list to the base revision's source (deterministic). It re-parses (must succeed) and runs the syntax, import and theme validators: literals are allowed because they're person-chosen, and **R10** keeps them on later AI edits. Then it writes a new revision with `author: "user_inline"`.
 - **Conflict rule (ADR-003 #14):** if the file's current revision ≠ `expectedHeadRevisionId` (the agent, a code save or another tab changed it meanwhile), return `409 stale` with the latest revision id. The client drops overrides, frames recompile, and the user re-selects.
 - **Lock:** if a run is writing this file right now (`runs.status = running` and `runs.step` targets this file's screen or component), return `423 locked`, with "AI is changing this screen".
 - Idempotent per `clientEditId`. The write emits `file.written {path, revisionId, author: "user_inline"}` on the **project-scoped event stream** (ADR-003 #5), so other tabs, collaborators and device preview (Phase 11) receive it. Frames in Edit mode **don't recompile** on `user_inline` revisions they produced themselves; overrides already show it.
@@ -100,7 +100,7 @@ hooks/use-inline-editor.ts                 (pending edits per file, overrides br
 ## API surface
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
-| POST | `/api/projects/:id/elements/resolve` | viewer | `{ afid, baseRevisionId }` → `{ kind: "named"\|"inline"\|"mixed"\|"dynamic", sharedCount, fileKind: "screen"\|"component", usedBy[], style, text?: {value, editable}, props }` |
+| POST | `/api/projects/:id/elements/resolve` | viewer | `{ afid, baseRevisionId }` (the revision must belong to this project) → `{ kind: "named"\|"inline"\|"mixed"\|"dynamic", sharedCount, fileKind: "screen"\|"component", usedBy[], style, text?: {value, editable}, props }` |
 | POST | `/api/projects/:id/files/edits` | editor | `{ path, baseRevisionId, expectedHeadRevisionId, clientEditId, edits: [{afid, op}] }` → `{ revisionId }`; 400 invalid value; 409 stale `{latestRevisionId}`; 422 dynamic target; 423 locked; 403 platform-owned file |
 
 Whole-file saves from the code editor use the separate `PUT /api/projects/:id/files/content` route (Phase 10b).

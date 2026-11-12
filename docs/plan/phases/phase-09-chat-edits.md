@@ -61,7 +61,7 @@ The Planner then replies with one sentence on what's starting.
 
 ### 3. Change pipeline (`worker/handlers/agent-step.ts`, change steps)
 Order (`05` §4.2):
-1. `data` (if `dataChange`): Data Designer returns **all** collections, **additive only**. The server diffs against the current collections and rejects any removal or type change. A new field needs a value on every existing record. Then it re-renders `data/schema.ts` and `data/seed.ts`.
+1. `data` (if `dataChange`): Data Designer returns **all** collections, **additive only**. The server diffs against the current collections and rejects any removal or type change, and any name that fails the identifier rule (Phase 13). A `shared` flag set here has no effect on a connected backend until the owner confirms it (`08` §8). A new field needs a value on every existing record. Then it re-renders `data/schema.ts` and `data/seed.ts`.
 2. `component:<Name>` for each add or edit: Component Builder gets the app context, earlier components' props APIs, and, for edits, the current file plus the request with the rule "keep every existing prop working; new props optional".
 3. `screen:<id>` for each add or edit: Screen Builder with the app context, routes, the first screen as style reference and, for edits, the current file plus the request and the CHOSEN_COLORS rule.
 4. Remove: soft-delete the route files of `removeScreens`. The tool-time guard already required every linking screen to be in `editScreens`. A final route validation still runs as a safety net; if it ever fails, the error lists the files.
@@ -122,11 +122,12 @@ evals/edits.jsonl
 ## API surface
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
-| POST | `/api/projects/:id/messages` | editor | `{ content, attachments?: assetId[], selectedElement?, error? }` → `{ messageId, runId }` (an `agent.chat` run) |
+| POST | `/api/projects/:id/messages` | editor | `{ content, attachments?: assetId[], selectedElement?, error? }` → `{ messageId, runId }` (an `agent.chat` run). Each `assetId` must belong to this project (`08` §2) |
 | POST | `/api/projects/:id/session` | editor | → `{ messageId }` (session_break, reason manual) |
 | POST | `/api/projects/:id/screens/:screenId/retry` | editor | → `{ runId }`: a new `change` run rebuilding one `error` screen (a retry, so charged) |
 | GET | `/api/projects/:id/snapshots` | viewer | → `{ snapshots: [{ id, label, createdAt, runId }] }` |
-| POST | `/api/projects/:id/snapshots/:snapshotId/restore` | editor | → `{ snapshotId (new), changedPaths[] }`; 409 if a run is active |
+| POST | `/api/projects/:id/snapshots/:snapshotId/restore` | editor | → `{ snapshotId (new), changedPaths[] }`; 409 if a run is active; 404 unless the snapshot belongs to this project |
+| POST | `/api/projects/:id/changes/:hash/confirm` | editor | starts a change the Planner proposed above the auto-apply threshold (`05` §3.3); `:hash` must equal the stored normalized `AppChange`; charges `changeCost` → `{ runId }` |
 | (Planner tool) | `update_app` | worker ctx | see `05` §3.3–§3.5 |
 
 ## Acceptance checklist

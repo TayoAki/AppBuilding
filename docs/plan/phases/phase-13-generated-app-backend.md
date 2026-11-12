@@ -22,7 +22,7 @@ The user clicks **Connect Backend** in the workspace header and signs in to **th
 - **R13:** tables are `app_<name>` with `id`, `owner_id`, timestamps and one typed column per field (`string`→`text`, `number`→`double precision`, `boolean`→`boolean`, `string[]`→`text[]`). `references` becomes an FK `on delete set null`. `useStoredValue` goes into one `app_values` table, the only JSON column. Migrations are **additive only** (removing a field leaves its column) and run in one locked transaction, from `setup_backend` and from the first data request after the collections change. A write with an unknown field or wrong type is refused with 400.
 - **R14:** apps can't hold database credentials. When the provider has no row-level security or functions for app code (CloudHike at the time), **our platform serves the app's data API** (`/api/apps/[projectId]/…`), checks the user's token against the project's auth, and writes to the person's database.
 - Ownership: a record's owner is the signed-in person, or else a random per-install id. Collections are private to their owner unless `shared`. Only the creator can change a record.
-  - **Amended (ADR-003 #19):** in **direct + RLS** mode a client-supplied install id can't be verified, because anyone with the publishable key could claim it. So direct mode **always deploys auth and signs every install in anonymously** (`owner_id = auth.uid()`). If the provider has no anonymous sign-in, use **gateway mode** for that app. Gateway mode can keep install ids, because the platform issues and signs them (`X-Install-Token`, HMAC with the project's secret).
+  - **Amended (ADR-003 #19):** in **direct + RLS** mode a client-supplied install id can't be verified, because anyone with the publishable key could claim it. So direct mode **always deploys auth and signs every install in anonymously** (`owner_id = auth.uid()`). If the provider has no anonymous sign-in, use **gateway mode** for that app. Gateway mode can keep install ids, because the platform issues and signs them (`X-Install-Token`, HMAC with the project's own key in `project_backends.install_token_secret_enc`; the token binds the projectId and expires after 30 days, refreshed on use).
 - Deploy only what's used: the database always; auth if the code uses `useAuth` (and **always in direct mode**, see above); storage if it uses `uploadFile`. Email requires the person's explicit acceptance of the provider's email policy. Jobs/Redis can deploy but aren't usable without server code, so the Planner says so.
 - Sync: screens load records on open. **Only preview frames poll (every 5 s), and only while the agent is changing screens.** There's no offline write queue.
 
@@ -49,7 +49,7 @@ export interface BackendProvider {
   getAuthorizeUrl(state: string, redirectUri: string): string;
   exchangeCode(code: string, redirectUri: string): Promise<OAuthTokens>;
   refresh?(t: OAuthTokens): Promise<OAuthTokens>;
-  ensureProject(ctx: ConnCtx, input: { name: string }): Promise<{ externalProjectId: string }>;  // idempotent
+  ensureProject(ctx: ConnCtx, input: { name: string; existingId?: string }): Promise<{ externalProjectId: string }>;  // idempotent on the stored id, never on a name lookup
   ensureServices(ctx: ConnCtx, id: string, services: ("database"|"auth"|"storage"|"email")[]): Promise<ServiceStatus[]>;
   runSql(ctx: ConnCtx, id: string, sql: string): Promise<void>;          // used only by derived DDL
   getPublicConfig(ctx: ConnCtx, id: string): Promise<PublicBackendConfig>;   // safe to ship
@@ -63,20 +63,22 @@ Add a `fake` provider (pg-mem or a local schema) for tests and evals.
 
 ### 2. OAuth connect flow
 - `GET /api/projects/:id/backend/connect` → `requireProjectAccess(id, "owner")`, random `state` in an HttpOnly cookie bound to user + project (short TTL), redirect to `getAuthorizeUrl`.
-- `GET /api/backend/callback?code&state` → verify state, `exchangeCode`, upsert `oauth_connections` (`provider = "backend:<id>"`, one per person, tokens encrypted). Then enqueue `backend.provision` and redirect to the workspace with `?backend=connecting`.
+- `GET /api/backend/callback?code&state` → verify state, `exchangeCode`, upsert `oauth_connections` (`provider = "backend:<id>"`, one per person, tokens encrypted). The provider's token is organization-wide (`15` §5): the owner picks the organization in the connect dialog, we store it in `project_backends.external_org_id`, and we only ever create and touch the one project recorded in `external_project_id` (`08` §3). Then enqueue `backend.provision` and redirect to the workspace with `?backend=connecting`.
 - Register the exact callback URL per environment. Open the workspace at `NEXT_PUBLIC_APP_URL` locally, because that's where the state cookie lives (the reference app documents this).
 
 ### 3. Schema derivation (`lib/backend-schema/derive.ts`)
 - `deriveDdl(collections, current)` → additive DDL only: `create table if not exists app_<name>(id text primary key, owner_id text not null, created_at timestamptz default now(), updated_at timestamptz default now(), …typed columns)`, `alter table … add column if not exists …` for new fields, FKs `on delete set null` for `references`, an `owner_id` index, and `app_values(owner_id, key, value jsonb)`.
-- Direct mode adds RLS policies: private collections `owner_id = auth.uid()` for every operation (installs without sign-in are anonymous users, so `auth.uid()` always exists); shared collections allow authenticated select (anonymous included) with owner-only writes.
+- **Identifiers:** collection and field names must match `^[a-z][a-zA-Z0-9]{0,40}$` and must not be SQL reserved words (rejected at Foundation/Data validation, Phase 08). `deriveDdl` and the gateway re-check the regex and always emit identifiers through one `quoteIdent()` helper; values are always parameters. A unit test feeds names such as `x"; drop table users; --` and expects a rejection (`08` §6).
+- Direct mode adds RLS policies: private collections `owner_id = auth.uid()` for every operation (installs without sign-in are anonymous users, so `auth.uid()` always exists); shared collections allow authenticated select (anonymous included) with owner-only writes. **Enable and force row-level security on every `app_*` table, `app_values` included** (`owner_id = auth.uid()` for every operation), so a table without a policy denies by default.
+- **`shared` needs the owner's confirmation.** A collection is treated as shared only if its name is in `project_backends.confirmed_shared` (set from the owner's setup dialog, never from model output or an editor's chat). A collection marked `shared` in the plan but not confirmed gets the private policy, and the owner sees "Make *products* readable by everyone who uses the app?". Changing a policy is an explicit `drop policy` + `create policy` in the `applySchema` transaction; "additive only" applies to tables and columns, not policies.
 - `applySchema(projectId)` takes `pg_advisory_xact_lock(hash(projectId))` (or the provider's equivalent) in one transaction, then records `project_backends.schema_version` (the hash of the collections).
 - Unit-test the DDL for every field type, references, shared vs private, and the "remove a field → column stays" case.
 
 ### 4. `setup_backend` Planner tool + provisioning job
-- Tool input: `{ extras?: ("storage"|"email")[], sharedCollections?: string[], acceptEmailPolicy?: boolean }`. Server checks: the backend is connected, the app is built, and email only if `acceptEmailPolicy` (and the latest user message accepted it).
-- `worker/handlers/backend-provision.ts` (idempotent; runs from the tool, after connect, and **automatically at the end of any build/change of a connected app**):
-  1. Load the connection, decrypt, refresh if expired (`project_backends.status = reconnect_required` on failure).
-  2. `ensureProject` (one backend project per app).
+- Tool input: `{ extras?: ("storage"|"email")[], suggestShared?: string[] }`. **The tool only proposes** (`05` §3.3): it opens the backend setup dialog for the owner with these suggestions. The owner ticks extras, confirms each shared collection by name and accepts the email policy there; `POST /api/projects/:id/backend/setup` (owner) stores the choices (`services`, `confirmed_shared`) and enqueues provisioning. Nothing the model or an editor writes can make a collection public or deploy a billable service. Server checks: the backend is connected and the app is built.
+- `worker/handlers/backend-provision.ts` (idempotent; runs from the owner's setup dialog, after connect, and **automatically at the end of any build/change of a connected app**; the automatic run adds tables and columns only, with the settings the owner already confirmed):
+  1. Load **the project owner's** connection (never the acting user's, even when an editor's change triggered the run), decrypt, refresh if expired (`project_backends.status = reconnect_required` on failure).
+  2. `ensureProject` (one backend project per app), passing the stored `external_project_id`; a rename of the app never changes which provider project is used.
   3. Services: always `database`. Add `auth` if any file imports `useAuth`, **or always in direct mode** (enable anonymous sign-in there). Add `storage` if `uploadFile` is used, plus the requested extras.
   4. `applySchema`.
   5. `getPublicConfig` → `project_backends.public_config`; `getSecretConfig` → `secret_config_enc`.
@@ -96,6 +98,12 @@ Add a `fake` provider (pg-mem or a local schema) for tests and evals.
 - Per request: look up `project_backends` (cached), resolve the caller (`verifyUserToken` with the project's auth, else a gateway-signed install token; unsigned ids are rejected), check collection exists and `shared` rules, validate fields and types (unknown field or wrong type → 400), and run parameterized SQL with the decrypted credential. It never returns credentials, connection strings or stack traces.
 - On the first data request after `schema_version` changes, run `applySchema` first.
 - Rate-limit per project + caller. Add CORS for the app origins (Expo web publish URL, device-preview origins, preview runtime).
+- **The gateway is a public API** (the projectId ships in every bundle), so (`08` §8):
+  - `POST /install` issues the install token. Limit it per IP and per project (for example 10 per IP per hour, 1,000 per project per day, owner-adjustable), since "per caller" limits mean nothing if callers can mint identities freely.
+  - Quotas per install and per project: rows, bytes per row, total bytes, uploads per day and upload size. Over quota → 429 with a clear message; the owner sees usage in the Backend tab.
+  - `/email/me` works only for a verified signed-in user of the app, never for an anonymous install, and is limited per user per day.
+  - It never reads the platform's session cookie, never sends `Access-Control-Allow-Credentials`, and is the only path that accepts the `null` origin. `Origin` checks for the platform's own routes don't apply here.
+  - One DB connection pool per project with a small cap and a statement timeout, so one app can't exhaust the platform's connections.
 
 ### 7. Workspace UI
 - Header **Connect Backend** → dialog (what will be created, billed to whom) → **Connect <Provider>**. The **Share** option lives under the Export menu.
@@ -125,10 +133,11 @@ Add a `fake` provider (pg-mem or a local schema) for tests and evals.
 | GET | `/api/projects/:id/backend/connect` | owner | → 302 provider authorize URL |
 | GET | `/api/backend/callback?code&state` | session + state cookie | → 302 `/workspace/:id?backend=connecting` |
 | GET | `/api/projects/:id/backend` | viewer | → `{ provider, status, services[], dashboardUrl, authProviders }` (no secrets) |
-| POST | `/api/projects/:id/backend/provision` | editor | → `{ runId }` (re-run, idempotent) |
+| POST | `/api/projects/:id/backend/provision` | owner | → `{ runId }` (re-run, idempotent; always the owner's connection) |
+| POST | `/api/projects/:id/backend/setup` | owner | `{ extras[], confirmedShared[], emailPolicyAccepted }` → `{ runId }` (the only way to add extras or confirm shared collections) |
 | POST | `/api/projects/:id/backend/auth-providers` | owner | `{ google?: { clientId, clientSecret } }` → `{ ok }` |
 | DELETE | `/api/projects/:id/backend` | owner | → `{ ok }` (disconnect, keeps remote project) |
-| * | `/api/apps/:projectId/...` | app user token / install id | gateway (mode-dependent), see Step 6 |
+| * | `/api/apps/:projectId/...` | app user token / signed install token | gateway (mode-dependent), see Step 6; no platform cookies |
 | (Planner tool) | `setup_backend` | worker ctx | see Step 4 |
 
 ## Acceptance checklist
@@ -143,7 +152,11 @@ Add a `fake` provider (pg-mem or a local schema) for tests and evals.
 - [ ] The model never receives provider tokens, keys or raw provider tools (unit test on the Planner tool list and tool results).
 - [ ] `lib/backend/config.ts` and every materialized file contain only public config. A test asserts no secret patterns in materialized output.
 - [ ] Tokens and `secret_config_enc` are encrypted (DB inspection shows `v1:` ciphertext).
-- [ ] **AuthZ:** a viewer or non-member calling connect, provision, auth-providers or DELETE gets 403/404 (connect/disconnect/auth-providers are owner-only per the `08` §2 matrix). State tampering is rejected. Gateway mode: one app user can't read or modify another's private records (test).
+- [ ] A collection marked `shared` by the model or through an editor's chat stays private until the owner confirms it in the dialog (test in both modes). `app_values` and every `app_*` table have row-level security enabled and forced.
+- [ ] An editor's change that triggers provisioning uses the owner's connection and the stored `external_project_id` (test with an editor who has their own provider connection).
+- [ ] Gateway: token issuance is rate-limited, quotas return 429, `/email/me` refuses anonymous installs, and a request carrying a platform session cookie gets no extra rights.
+- [ ] Hostile collection and field names are rejected, and all DDL goes through `quoteIdent()`.
+- [ ] **AuthZ:** a viewer, editor or non-member calling connect, provision, setup, auth-providers or DELETE gets 403/404 (all owner-only per the `08` §2 matrix). State tampering is rejected. Gateway mode: one app user can't read or modify another's private records (test).
 - [ ] Disconnect reverts to local; the remote project is untouched. Re-running provision is idempotent.
 
 ## Claude Code prompt

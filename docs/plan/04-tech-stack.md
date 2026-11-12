@@ -71,14 +71,16 @@ Validated at boot by `lib/env.ts` (Zod). The web app and the worker share the sa
 | `MAX_SCREENS_DEFAULT` | worker | 06 | — | default `3` |
 | `AGENT_SCREEN_CONCURRENCY` | worker | 08 | — | screens built in parallel (default 1 = sequential, so the first screen can serve as style reference; 2 max) |
 | `ENCRYPTION_KEY` / `ENCRYPTION_KEY_VERSION` | web, worker | 02 | ✅ | 32 random bytes base64; versioned for rotation |
-| `PREVIEW_ORIGIN` | web | 07 | — | optional separate origin for preview runtime |
+| `PREVIEW_ORIGIN` | web | 07 | — | origin the preview runtime is loaded from; the app origin in dev, a **separate registrable domain** in production (`08` §4) |
 | `SANDBOX_URL` | worker | 08 | — | base URL of the sandbox service (`08` §5) |
-| `SANDBOX_TOKEN_SECRET` | worker, sandbox | 08 | ✅ | HMAC key for per-job tokens; the **only** secret the sandbox holds |
+| `SANDBOX_SIGNING_KEY` | worker | 08 | ✅ | Ed25519 private key that signs per-job tokens for the sandbox and the runner |
+| `SANDBOX_VERIFY_KEY` | sandbox, runner | 08 | — | the matching public key. The sandbox holds **no secret at all**, so code running there can't mint job tokens |
+| `RUNNER_URL` | worker | 16 | — | base URL of the runner service (credentialed `eas-cli` steps, `08` §5) |
 | `DEVICE_PREVIEW_MODE` | web, worker | 11 | — | `devserver` (default, Path B) \| `snack` (Path A, only if a published `snack-sdk` supports the template SDK) |
-| `DEVICE_PREVIEW_BASE_DOMAIN` | sandbox, worker | 11 | — | domain for per-session dev-server URLs (Path B, if S3 picks the reverse-proxy mechanism) |
+| `DEVICE_PREVIEW_BASE_DOMAIN` | sandbox, worker | 11 | — | domain for per-session dev-server URLs (Path B, if S3 picks the reverse-proxy mechanism); a separate registrable domain from the app (`08` §4) |
 | `EMAIL_PROVIDER_API_KEY` / `EMAIL_FROM` | web, worker | 02 | ✅ / — | verification and invite emails (`lib/email`) |
 | `SMTP_URL` | web, worker | 02 | ✅ | dev only: Mailpit SMTP (`smtp://localhost:1025`); production uses the provider API key |
-| `DAILY_SPEND_CAP_USD` | worker | 06 | — | per-user model-spend cap before billing exists (default `5`); kept as a safety valve after Phase 18 |
+| `DAILY_SPEND_CAP_USD` | worker | 06 | — | per-user model-spend cap, enforced in `lib/ai/client.ts` before every model call from Phase 06 on (default `5`); kept as a safety valve after Phase 18 |
 | `IMAGEKIT_URL_ENDPOINT` | worker, generated apps | 12 | — | public |
 | `IMAGEKIT_PRIVATE_KEY` | worker | 12 | ✅ | never sent to clients or generated apps |
 | `IMAGEKIT_ENABLED` | worker | 12 | — | `true` → generators write ImageKit generation URLs; otherwise placeholders |

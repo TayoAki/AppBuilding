@@ -41,7 +41,7 @@ preview-runtime/
                        Stack, Tabs, Slot, Link, Redirect, router, useRouter,
                        useLocalSearchParams, useSegments, usePathname, Stack.Screen options
       expo-haptics.ts (no-op), expo-image-picker.ts (<input type=file>), expo-clipboard.ts,
-                       expo-location.ts (browser geolocation, permission-gated), expo-notifications.ts (no-op),
+                       expo-location.ts (permission-denied stub; frames get no `allow=` delegation), expo-notifications.ts (no-op),
                        expo-linking.ts, expo-status-bar.ts — one shim per module in 06 §4
       async-storage.ts in-memory store; the parent persists snapshots via postMessage
                        (a sandboxed iframe without allow-same-origin has no usable
@@ -62,7 +62,7 @@ preview-runtime/
 
 ## 4. Parent ↔ iframe protocol (`bridge.ts`)
 
-All messages are `{ v: 1, type, ... }`. Validate them with Zod on **both** sides. Accept messages only from the known iframe `contentWindow` (opaque origins show up as `"null"`, so compare `event.source`, not just `origin`).
+All messages are `{ v: 1, type, ... }`. Validate them with Zod on **both** sides. Accept messages only from the known iframe `contentWindow` (opaque origins show up as `"null"`, so compare `event.source`, not just `origin`). Strings that arrive from a frame (`runtime.error`, console lines, element labels) are rendered as text, never as HTML. `storage.snapshot` payloads are size-capped (1 MB) and stored under the parent's own `projectId`, never one named in the message.
 
 Parent → runtime:
 | type | payload |
@@ -104,8 +104,11 @@ Mapping `afid` → AST node on the server: re-parse the current revision and fin
 ## 6. Isolation and security
 
 - Iframes use `sandbox="allow-scripts"` **without** `allow-same-origin`. The result is an opaque origin: no cookies, no `localStorage` from the parent origin, no fetch with credentials to our API.
-- Load the runtime HTML via `srcdoc` (or from a separate preview domain). Set a CSP that allows only our vendor/runtime script URLs, `img-src` for the image provider, our storage and data/blob, **`font-src <runtime origin> data:`** (Ionicons ships as `@font-face`; without it icons render blank, ADR-003 #15), and `connect-src` limited to the connected backend's URL (or our gateway) once Phase 13 exists:
-  `default-src 'none'; script-src <runtime origin> 'unsafe-eval'; style-src 'unsafe-inline'; font-src <runtime origin> data:; img-src https: data: blob:; connect-src <backend or gateway URL>`
+- Load the runtime HTML **by URL from `PREVIEW_ORIGIN`**, never via `srcdoc` (a `srcdoc` document inherits the embedding page's CSP, which would force `'unsafe-eval'` into the app shell). In production `PREVIEW_ORIGIN` is on a **separate registrable domain** from the app (`08` §4); in local dev it's the app's own `localhost` origin.
+- Every response under the runtime path carries `Content-Security-Policy: sandbox allow-scripts; …`, so the document has an opaque origin even when someone opens its URL directly in a tab. Runtime scripts and fonts are served with `Access-Control-Allow-Origin: *` so the opaque origin can load them.
+- Set a CSP that allows only our vendor/runtime script URLs, `img-src` for the image provider, our storage and data/blob, **`font-src <runtime origin> data:`** (Ionicons ships as `@font-face`; without it icons render blank, ADR-003 #15), and `connect-src` limited to the connected backend's URL (or our gateway) once Phase 13 exists:
+  `default-src 'none'; script-src <runtime origin> 'unsafe-eval'; style-src 'unsafe-inline'; font-src <runtime origin> data:; img-src <image provider> <our storage> https://picsum.photos data: blob:; connect-src <backend or gateway URL>`
+  `img-src` is a host list, not `https:`, so code in a public project can't send data to arbitrary hosts through image requests.
 - `html-to-image` frame snapshots must inline fonts and images (fetch them as data URLs first), or snapshots show missing icons.
 - Phase 07 acceptance includes a check that icons render under the **production CSP** in a sandboxed frame.
 - The runtime never receives platform tokens. Files are pushed in by the parent via `postMessage`; the runtime has no API access of its own.
@@ -120,7 +123,9 @@ Mapping `afid` → AST node on the server: re-parse the current revision and fin
 
 ## 8. Render smoke test (server side, Phase 08)
 
-The **sandbox service** (no secrets, no DB access; `08` §5, ADR-003 #18) runs Playwright + Chromium. It serves the bundled `public/preview-runtime/` (built into the sandbox image, the same build as the web app's) from a local static server on `127.0.0.1`, and loads `harness.html` with the project's files, which the worker passes in as a signed storage URL. It renders each route in turn and collects `runtime.error` messages. Their count goes into `validation.result`, and errors go back to the agent's fix stage. The same harness produces **thumbnails** for the projects grid (Phase 17).
+The **sandbox service** (no secrets, no DB access; `08` §5, ADR-003 #18) runs Playwright + Chromium. It serves the bundled preview runtime (built into the sandbox image, the same build as the web app's) from a local static server on `127.0.0.1`, and loads `harness.html` with the project's files, which the worker passes in as a signed storage URL. It renders each route in turn and collects `runtime.error` messages. Their count goes into `validation.result`, and errors go back to the agent's fix stage. The same harness produces **thumbnails** for the projects grid (Phase 17).
+
+`harness.html` is built **only into the sandbox image** (`sandbox/static/`), never into the web app's `public/`: a page on the platform's site that runs whatever files are posted to it would let any website run code there. The harness renders project code inside the same `sandbox="allow-scripts"` iframe and CSP as production, and Chromium's network is limited to the local static server, the image provider and our storage (no loopback beyond that server, no link-local or private ranges; `08` §5).
 
 ## 9. Spike plan (Phase 00b S1; the code graduates into `preview-runtime/`)
 

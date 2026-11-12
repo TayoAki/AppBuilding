@@ -38,12 +38,12 @@ Make the platform safe to open to the public, and keep it working as vendors mov
 - Job steps, each idempotent:
   1. Cancel the Stripe subscription immediately and detach payment methods.
   2. Revoke provider tokens where an API exists (GitHub App user token, backend provider). Tell the user to revoke their Expo token. Delete `oauth_connections`. Offer the keystore download first if option B keystores exist, then delete `project_signing`.
-  3. Hard-delete owned projects (same scope as the purge), memberships and pending invites. Shared projects owned by others stay.
+  3. Hard-delete owned projects (same scope as the purge) with their export zips and device sessions, memberships and pending invites. Shared projects owned by others stay, with `runs.created_by` and `project_members.invited_by` set to null there. Remixes other people made stay theirs. List any public Snack saves so the person can remove them.
   4. Anonymize `ai_usage` and `credit_ledger` (`user_id` → null). **Keep `signup_grants(email_hash)`** so a re-signup with the same email gets no second grant (ADR-003 #22).
   5. Delete the Better Auth user, sessions and accounts, then send a confirmation email.
 
 ### 3. Export my data
-- Settings → **Export my data** → a job that reuses the Phase 14 zip export per project (`materialize({target:"export"})`) plus `profile.json`, `chat/<projectId>.json` and `ledger.csv`, all in one zip, with a signed link emailed (7-day expiry).
+- Settings → **Export my data** → a job that reuses the Phase 14 zip export per project (`materialize({target:"export"})`) plus `profile.json`, `chat/<projectId>.json` and `ledger.csv`, all in one zip. The email says the export is ready and links to the signed-in settings page, which issues a 5-minute download URL (authorized by `runs.created_by`); the email never carries the download link itself. The zip is deleted after 7 days.
 
 ### 4. Template-upgrade machinery (`06` §11, ADR-003 #9)
 - **Rule:** template **revisions** within one SDK render from HEAD for every project and must stay backward compatible, which CI checks by rendering the fixture and eval projects. Only **SDK changes** create a new versioned template.

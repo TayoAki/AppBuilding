@@ -32,7 +32,7 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 - Unit test: a materialized fixture project passes `npm install && npx tsc --noEmit` in CI (nightly job; too slow per PR).
 
 ### 2. Secret scanner
-`lib/validate/secrets.ts`: regex + entropy checks (private key headers, `sk_live_`, `service_role`, `ghp_`, `github_pat_`, AWS keys, JWTs with a `service_role` claim). It runs on materialized files and returns findings with path + line. Used by zip, GitHub, and later EAS/web.
+`lib/validate/secrets.ts`: regex + entropy checks (private key headers, `sk_live_`, `sk_test_`, `whsec_`, `sb_secret_`, `sk-ant-`, `service_role`, `ghp_`, `github_pat_`, Expo access tokens, AWS keys, JWTs with a `service_role` claim). It runs on materialized files and returns findings with path + line. Used by zip, GitHub, and later EAS/web.
 
 ### 3. Zip export job
 - `POST /api/projects/:id/export/zip` → `requireProjectAccess(editor)` (per the `08` §2 matrix) → in one transaction insert the run (`kind = export_zip`, `created_by`, `billed_user_id` = owner) and a `job_outbox` row (ADR-003 #7). The outbox dispatcher enqueues the job with payload `{runId, projectId, userId}`.
@@ -42,11 +42,11 @@ Users own their code. From the workspace **Export** menu they can (1) download t
 
 ### 4. GitHub App setup + connect
 - Create the GitHub App (manual, documented in `docs/plan/09-dev-workflow.md` or this file's notes): permissions Contents RW, Pull requests RW, Metadata R, Administration RW (only needed to create repos for the user); "Request user authorization (OAuth) during installation" on; callback URL `/api/github/callback`; one app per environment (dev/prod) to keep callback URLs clean.
-- `GET /api/github/connect?projectId=` → redirect to the app's installation/authorize URL with signed `state`.
-- `GET /api/github/callback` → exchange code for a user-to-server token (and refresh token if expiring tokens are enabled) → `oauth_connections` (`provider = "github"`, encrypted) → redirect back with `?github=connected`.
+- `GET /api/github/connect?projectId=` → redirect to the app's installation/authorize URL with `state` (random, bound to the session, single-use, 10-min TTL; `08` §3).
+- `GET /api/github/callback` → exchange code for a user-to-server token (and refresh token if expiring tokens are enabled) → `oauth_connections` (`provider = "github"`, encrypted) → redirect back with `?github=connected`. A callback without a valid `state` stores nothing. **Ignore any `installation_id` query parameter**: it's caller-supplied, and trusting it would let someone attach another customer's installation.
 
 ### 5. Repo picker / create
-- `GET /api/github/repos` → list repos the installation can access (paginate, search).
+- `GET /api/github/repos` → list repos **the acting user's user-to-server token** can access through the App (`GET /user/installations`, then `GET /user/installations/:id/repositories`; paginate, search). Never list with an installation token.
 - `POST /api/github/repos` `{ name, private, description }` → validate the name → create the repo under the user's account with **`auto_init: true`** → returns `{ owner, repo, defaultBranch }`.
 - Dialog: "Create new repo" (prefilled slug, private toggle, description "Built with AppBuilding") or "Use existing repo".
 
@@ -61,19 +61,19 @@ Worker `export-github.ts`:
 - Handle a non-fast-forward or deleted repo: re-fetch the head and retry once; if the repo is gone, clear `project_github_repos` and ask the user to pick again.
 
 ### 7. Sharing
-**7a (v1 minimum, reference-app parity):** view-only sharing with existing accounts. The owner enters an email, it resolves to an existing user (otherwise "No AppBuilding account with this email"), and a `project_members` row with `role = viewer` is created. All mutating routes stay owner-only.
+**7a (v1 minimum, reference-app parity):** view-only sharing with existing accounts. The owner enters an email. If it resolves to an existing user **with a verified email**, a `project_members` row with `role = viewer` is created; otherwise nothing is created. The response is the same in both cases ("If that person has an AppBuilding account, they now have access"), so the form can't be used to test which emails have accounts. All mutating routes stay owner-only.
 
 **7b (full plan):**
 - Share dialog (from the Export menu, matching the video's placement): email input + role select (viewer/editor) → `POST /api/projects/:id/members`.
-- If the email belongs to an existing user → immediate access; otherwise create a pending `project_members` row and send an invite email with a signed accept link (`/invite/:token`). Accepting while signed in as that email binds `user_id` and sets `accepted_at`.
-- "Copy project link" → `/workspace/:id`. Access still requires membership, unless the project is public/unlisted (Phase 17 adds a read-only public page).
+- If the email belongs to an existing user **whose email is verified** → immediate access; otherwise (no account, or an unverified one) create a pending `project_members` row and send an invite email with an accept link (`/invite/:token`). The UI answer is "Invite sent" either way. The token is 32 random bytes, stored hashed, valid 7 days, single-use, bound to the invited email and role, and void if the invite is removed or its role changes. Accepting requires a session whose **verified** email equals the invited one; it binds `user_id` and sets `accepted_at`. Access checks use `user_id`, never the email column (`08` §2).
+- "Copy project link" → `/workspace/:id`. Access always requires membership. A public/unlisted project has its own read-only page at `/p/:id` (Phase 17); visibility never opens the workspace.
 - Member list with role change/remove (owner only).
 - Update `requireProjectAccess()` to consult `project_members` (viewer < editor < owner).
 
 ## Files to create / change
 - `lib/vfs/materialize.ts` (README, .gitignore), `templates/expo-app/README.md.hbs`, `templates/expo-app/.gitignore`
 - `lib/validate/secrets.ts`
-- `lib/providers/github/{app.ts,client.ts,gitdata.ts}` (JWT for app auth via `GITHUB_APP_PRIVATE_KEY`, user-token client, tree/commit helpers)
+- `lib/providers/github/{app.ts,client.ts,gitdata.ts}` (user-token client, tree/commit helpers; the app JWT from `GITHUB_APP_PRIVATE_KEY` is used only for app-level calls such as revoking a grant, never to mint installation tokens)
 - `worker/handlers/{export-zip.ts,export-github.ts}`
 - `app/api/projects/[projectId]/export/{zip,github}/route.ts`, `app/api/runs/[runId]/download/route.ts`
 - `app/api/github/{connect,callback,repos}/route.ts`
@@ -85,7 +85,7 @@ Worker `export-github.ts`:
 ## Database changes
 - `oauth_connections`: rows with `provider = 'github'`.
 - `project_github_repos`: `project_id`, `owner`, `repo`, `default_branch`, `last_pushed_snapshot_id`, `last_commit_sha`.
-- `project_members`: `project_id`, `user_id` (null until accepted), `email`, `role`, `invited_by`, `accepted_at`; unique (project_id, email). Add `invite_token_hash` + `invite_expires_at`.
+- `project_members`: `project_id`, `user_id` (null until accepted), `email`, `role`, `invited_by`, `accepted_at`; unique (project_id, email). Add `invite_token_hash` + `invite_expires_at`, and `daily_credit_cap` (int, default 50; `08` §2).
 - `project_snapshots` used as the export source.
 - New `runs.kind` values in use: `export_zip`, `export_github`.
 
@@ -93,13 +93,13 @@ Worker `export-github.ts`:
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
 | POST | `/api/projects/:id/export/zip` | editor | → `{ runId }` |
-| GET | `/api/runs/:runId/download` | member of run's project | → 302 signed URL |
+| GET | `/api/runs/:runId/download` | editor of the run's project (account-level runs: `created_by`) | → 302 signed URL |
 | GET | `/api/github/connect?projectId=` | session | → 302 GitHub |
 | GET | `/api/github/callback` | session + state | → 302 workspace |
 | GET | `/api/github/status` | session | → `{ connected, login }` |
 | GET | `/api/github/repos?q=&page=` | session + github | → `{ repos: [{owner, name, private, defaultBranch}] }` |
 | POST | `/api/github/repos` | session + github | `{ name, private, description? }` → `{ owner, repo, defaultBranch }` |
-| POST | `/api/projects/:id/export/github` | editor | `{ owner?, repo? }` → `{ runId }` |
+| POST | `/api/projects/:id/export/github` | editor | `{ owner?, repo? }` → `{ runId }`. `{owner, repo}` must be in the acting user's repo list (checked here and again in the worker, both with that user's token) |
 | GET/POST/PATCH/DELETE | `/api/projects/:id/members` | owner (viewer may GET) | `{ email, role }` → member list |
 | POST | `/api/invites/:token/accept` | session (email must match) | → `{ projectId }` |
 

@@ -166,7 +166,7 @@ Secondary: `app/api/runs/[runId]/events/route.ts` is the same stream filtered by
 Also add `GET /api/projects/:id/runs/active` → the latest non-terminal run, so the workspace can render progress state on load.
 
 ### 8. Cancel endpoint
-`POST /api/runs/:runId/cancel` (editor): `requestCancel` → `run.status` event. The handler stops at its next checkpoint.
+`POST /api/runs/:runId/cancel` (editor): `requestCancel` → `run.status` event. The handler stops at its next checkpoint. Cancel refunds only steps that hadn't started; a step that already called the model stays charged (Phase 18).
 
 ### 9. Demo jobs (prove the pipe)
 - `worker/handlers/demo-echo.ts` (single-shot): for `i in 1..steps`, `appendEvent(projectId, runId, "demo.tick", {i})`, `heartbeat`, `sleep(1000)`, check cancel. A `?failOnce=1` flag throws on attempt 1, to prove retry and `run.status retrying`.

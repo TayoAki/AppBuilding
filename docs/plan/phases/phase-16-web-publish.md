@@ -12,7 +12,7 @@
 **Publish → Web** turns the generated Expo app into a website, using react-native-web via `expo export -p web`, and deploys it to a public URL anyone can open and share. Republishing updates the same URL, and a failed update leaves the previous version online. The deploy runs in the background and its progress stays visible after the dialog is closed. The live URL also appears in the App Preview tab. Web publishing is available on every plan, and **only the project owner** can publish (`08` §2, ADR-003 #3).
 
 ## What we do differently from the video (and why)
-- **Export in our sandbox, then upload.** The video waited on Expo's build queue (~12.7 min on the free plan) and first failed with "no dist folder found". We run `npx expo export -p web` in the **sandbox service** (ADR-003 #18: untrusted generated code, no platform secrets), which takes about a minute with no queue. Then `eas deploy` only uploads `dist/`.
+- **Export in our sandbox, then upload.** The video waited on Expo's build queue (~12.7 min on the free plan) and first failed with "no dist folder found". We run `npx expo export -p web` in the **sandbox service** (ADR-003 #18: untrusted generated code, no platform secrets), which takes about a minute with no queue. Then `eas deploy` only uploads `dist/`, and it runs in the separate **runner service** (`08` §5), so the owner's Expo token is never on the machine that ran the generated code.
 - **Cached dependencies per template version.** `package.json` is platform-owned, so the sandbox links a prebuilt `node_modules` per template version. That makes it fast, and no install scripts from project code ever run.
 - **Verified facts** (`15-vendor-facts.md` §1, §4):
   - **Set `web.output: "single"` explicitly.** SDK 58 Expo Router defaults to `"server"`, which renders HTML on each request and wouldn't fit the free hosting tier's 10 CPU-ms per request.
@@ -36,12 +36,12 @@
 
 ### 1. Expo connect (shared with Phase 15)
 - Settings / Publish dialog: **Connect Expo** → instructions (expo.dev → Account settings → Access tokens → create) → paste the token.
-- `POST /api/expo/token` (session) → the sandbox validates it (`eas whoami --json` with the token only) → stored encrypted as `oauth_connections(provider = "expo")`, with `external_login` = Expo username.
+- `POST /api/expo/token` (session) → the runner validates it (`eas whoami --json` with the token only) → stored encrypted as `oauth_connections(provider = "expo")`, with `external_login` = Expo username.
 - Show the connected account and **Disconnect** (deletes our row; tell the user to revoke the token on expo.dev).
 
 ### 2. EAS project + identity, set once (shared with Phase 15)
 - `ensureIdentity(projectId)` on the first publish or build: `projects.slug` = `<kebab app name>-<6 chars of project id>`, `android_package` = `com.<expoUsername>.<slug without dashes>`, `bundle_id` = the same. They're shown in the dialog and editable until the first store build (Phase 15 locks package and bundle id; `slug` is locked after the first publish too, because it's the hosting name).
-- `ensureEasProject(projectId)`: the sandbox runs `eas init --non-interactive --force` (verify flags) with the **owner's** token and `owner` set in `app.json` (required for robot tokens, `15` §2). Store `projects.eas_project_id`; it's rendered into `app.json` `extra.eas.projectId`.
+- `ensureEasProject(projectId)`: the runner runs `eas init --non-interactive --force` (verify flags) with the **owner's** token and `owner` set in `app.json` (required for robot tokens, `15` §2). Store `projects.eas_project_id`; it's rendered into `app.json` `extra.eas.projectId`.
 - Phase 15 adds `ensureEasWebhook`. Web publish doesn't need webhooks.
 
 ### 3. `HostingProvider` interface
@@ -59,10 +59,9 @@ export interface HostingProvider {
 1. Owner check; `ensureIdentity`; `ensureEasProject`.
 2. If the project has a connected backend and `NEXT_PUBLIC_APP_URL` is a localhost/private URL, fail fast: "Publish from your deployed AppBuilding. This app's data API isn't reachable from the internet."
 3. `materialize({ target: "web" })` (static `app.json` with **`web.output: "single"`**) → tarball → signed URL; secret scan.
-4. Sandbox `POST /jobs/web-publish` (HMAC per-job token) `{tarballUrl, templateVersion, devDomain: slug, expoToken}` →
-   - unpack, link cached `node_modules`;
-   - `npx expo export --platform web --output-dir dist` (env allowlist, no platform secrets, 5 min timeout); check that `dist/index.html` exists;
-   - `EXPO_TOKEN=… eas deploy --prod --non-interactive --json --export-dir dist --dev-domain <slug>`. If the dev domain is taken, return `DEV_DOMAIN_TAKEN`; the worker then retries once with `<slug>-<4 chars>` and stores that as the slug;
+4. Two jobs, so the token and the generated code never meet (`08` §5):
+   - **Sandbox** `POST /jobs/web-export` (signed per-job token) `{tarballUrl, templateVersion, distUploadUrl}`, **no token**: unpack (rejecting absolute paths, `..` and links), link cached `node_modules` read-only, run `npx expo export --platform web --output-dir dist` (env allowlist, no secrets of any kind, 5 min timeout), check that `dist/index.html` exists, and upload `dist/` as a tarball to the signed URL.
+   - **Runner** `POST /jobs/web-deploy` (signed per-job token) `{distUrl, easProjectId, devDomain: slug, expoToken}`: download and unpack the static `dist/` into a fresh per-job container next to a platform-generated `app.json`, then run `EXPO_TOKEN=… eas deploy --prod --non-interactive --json --export-dir dist --dev-domain <slug>`. Nothing from `dist/` is executed. If the dev domain is taken, return `DEV_DOMAIN_TAKEN`; the worker then retries once with `<slug>-<4 chars>` and stores that as the slug;
    - stream step logs back. The worker turns them into `publish.step` events (exporting / uploading / deploying) on the **project-scoped stream**.
 5. Upsert the project's single `web_deployments` row:
    - on success: `status = live`, `url`, `alias`, `snapshot_id`, `deployment_id`, clear `log_tail`;
@@ -85,7 +84,8 @@ export interface HostingProvider {
 - `lib/providers/hosting/{types.ts,eas-hosting.ts,index.ts,README.md}`
 - `lib/providers/expo/{connect.ts,identity.ts,eas-project.ts}` (shared with Phase 15)
 - `worker/handlers/publish-web.ts`
-- `sandbox/jobs/{web-publish.ts,eas-whoami.ts,eas-init.ts}`, sandbox image with `/opt/template-deps/<version>`
+- `sandbox/jobs/web-export.ts`, sandbox image with `/opt/template-deps/<version>`
+- `runner/server.ts`, `runner/jobs/{web-deploy.ts,eas-whoami.ts,eas-init.ts}`, `runner/Dockerfile` (Node 22 + pinned `eas-cli`; one container per job)
 - `templates/expo-app/app.json.hbs` (web section, `owner`, `extra.eas.projectId`)
 - `lib/validate/platform-guards.ts` (warning for unguarded native-only APIs)
 - `app/api/expo/token/route.ts`, `app/api/projects/[projectId]/publish/web/route.ts`
@@ -117,6 +117,7 @@ export interface HostingProvider {
 - [ ] Closing the dialog mid-publish doesn't stop it. Reopening shows the current step; another open tab sees the steps on the project stream.
 - [ ] An export failure shows the last ~50 log lines and **Fix with AI**, which sends the log to the Planner as a chat message.
 - [ ] Export runs in the sandbox without network installs and with only allowlisted env vars (tested).
+- [ ] The export job receives no Expo token; the deploy job runs in the runner and receives only the static `dist/` (tested: the sandbox job schema has no token field).
 - [ ] **AuthZ:** editors and viewers can see the URL but can't publish (403); non-members get 404.
 
 ## Claude Code prompt
@@ -136,16 +137,16 @@ Verify against the pinned expo / eas-cli: `expo export --platform web` flags, `e
 findings in lib/providers/hosting/README.md.
 
 Implement:
-1. Expo connect (validate in the sandbox, encrypt, oauth_connections 'expo').
+1. Expo connect (validate in the runner, encrypt, oauth_connections 'expo').
 2. ensureIdentity (slug with project-id suffix; package/bundle id editable until locked) +
    ensureEasProject (owner set in app.json).
 3. HostingProvider + eas_hosting.
 4. publish.web: materialize("web", web.output "single") → tarball → sandbox job (cached deps,
-   expo export, dist check, eas deploy with --dev-domain) → the ONE web_deployments row (url changes
+   expo export, dist check, no token) → runner job (eas deploy of the static dist with --dev-domain) → the ONE web_deployments row (url changes
    only on success) → publish.step events on the project stream. Refuse localhost + backend.
 5. Web tab UI (owner-only publish, progress, URL, history, roll back, free-tier notice).
 Tests: env allowlist, missing-dist failure, dev-domain-taken retry, web.output "single" in the rendered
-app.json, authz. Mock the HostingProvider and the sandbox in tests.
+app.json, authz. Mock the HostingProvider, the sandbox and the runner in tests.
 Do NOT build: native builds (Phase 15), custom domains, self-hosted static hosting, billing gates.
 Finish with lint, typecheck, tests; summarize and list manual setup (test Expo account).
 ```

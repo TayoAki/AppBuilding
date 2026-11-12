@@ -31,6 +31,7 @@ Exactly `07-preview-runtime.md` §9:
 5. Babel `afid` stamps (`line:col`) + click-to-select prints source location; `edit.override` restyles one element without restart.
 6. CSS-variable theme switch across all frames.
 - Also check that Ionicons render under the production CSP (`font-src` per ADR-003 #15) inside a sandboxed frame.
+- Security checks (`08` §4): load the runtime document **by URL** (not `srcdoc`) with the response header `Content-Security-Policy: sandbox allow-scripts; …`, and confirm that it still boots, that fonts and scripts load into the opaque origin, and that opening the same URL top-level also gets an opaque origin (`document.cookie` throws or is empty, `localStorage` is unavailable).
 - **Pass:** 1–6 work in Chrome and Safari; 8 frames stay usable; icons render. **Fallback:** `file:line:type` stamps (A7); Sandpack for the loader (A1).
 
 ### S2. Generator quality and cost (1.5 days), `spikes/generators/`
@@ -47,19 +48,19 @@ Exactly `07-preview-runtime.md` §9:
 The published `snack-sdk` stops at SDK 54 and store Expo Go runs only 58 (`15` §1), so test the default path first:
 - **Path B: hosted Expo dev server (default).** Materialize the fixture (SDK 58 template) into a temp dir with cached `node_modules`, then run `expo start` and get store Expo Go on one iPhone and one Android phone to load it over the internet. Try both connection mechanisms and record which works:
   (a) `expo start --tunnel`;
-  (b) our own reverse proxy per session (`https://p-<id>.preview.<domain>` → Metro) with `EXPO_PACKAGER_PROXY_URL` set, so the manifest's bundle URLs point at the proxy (check whether Expo Go accepts the `exps://` / https form).
-  Edit a file in the session dir and confirm Fast Refresh updates the phones without rescanning. Measure Metro memory per session and cold-start time.
+  (b) our own reverse proxy per session (`https://p-<id>.<a separate registrable domain>` → Metro; never a subdomain of the app's domain, `08` §4) with `EXPO_PACKAGER_PROXY_URL` set, so the manifest's bundle URLs point at the proxy (check whether Expo Go accepts the `exps://` / https form).
+  Edit a file in the session dir and confirm Fast Refresh updates the phones without rescanning. Measure Metro memory per session and cold-start time. For (b), list which Metro paths Expo Go actually needs (manifest, bundle, assets, hot-reload socket) so the proxy can forward only those, and confirm that Fast Refresh still works with the debugger, inspector, symbolicate and open-in-editor endpoints blocked.
 - **Path A: Snack.** Only if a **published** `snack-sdk` lists SDK 58 on the day of the spike: materialize to the `snack` target (`06` §10) and repeat the phone test.
 - **Path C: web fallback.** Open the web preview URL in the phone's browser and confirm it renders and navigates.
 - **Pass:** Path B (or A) loads on both phones, an edit shows in < 5 s, and tabs look native; Path C works. **Fallback:** ship Path C first and record an ADR (A2, A3).
 
 ### S4. EAS Android build (+ iOS if an Apple account is available) (1 day)
-- With a test Expo account: materialize to `eas` (SDK 58, `appVersionSource: "remote"`, `owner` set in app.json), then `EAS_NO_VCS=1 eas build --platform android --profile preview --non-interactive --no-wait --json` with `EXPO_TOKEN`. **Let EAS generate the keystore** (`15` §2), and confirm a second build reuses it. Create a **per-project** webhook (`eas webhook:create --event BUILD`, a per-project secret ≥ 16 chars; a temporary tunnel is fine here) and verify `expo-signature` (HMAC-SHA1, `sha1=<hex>`). Then re-fetch the build by id with the token (payloads are hints, ADR-003 #17).
+- With a test Expo account: materialize to `eas` (SDK 58, `appVersionSource: "remote"`, `owner` set in app.json), then `EAS_NO_VCS=1 eas build --platform android --profile preview --non-interactive --no-wait --json` with `EXPO_TOKEN`. **Let EAS generate the keystore** (`15` §2), and confirm a second build reuses it. Create a **per-project** webhook (`eas webhook:create --event BUILD`, a per-project secret ≥ 16 chars; a temporary tunnel is fine here) and verify `expo-signature` (HMAC-SHA1, `sha1=<hex>`). Then re-fetch the build by id with the token (payloads are hints, ADR-003 #17). **Confirm `eas build` executes no project module locally:** put a top-level `require('fs').writeFileSync('/tmp/pwned','1')` in a screen file and check the file doesn't appear on the machine running `eas-cli` (the runner depends on this, `08` §5).
 - iOS (optional): with an Apple account, confirm that a missing distribution certificate fails non-interactively, and that it works after creating the cert once plus the ASC API key env vars.
 - **Pass:** the APK installs and runs on a device; the webhook verifies; the re-fetch matches. **Fallback:** poll-on-view (A12); `keytool` keystore + local credentials (A10).
 
 ### S5. EAS Hosting (0.25 day)
-- `npx expo export --platform web` (with `web.output: "single"` set explicitly; SDK 58 defaults to `server`) + `eas deploy --prod --dev-domain <slug> --non-interactive --json`; republish keeps the URL.
+- `npx expo export --platform web` (with `web.output: "single"` set explicitly; SDK 58 defaults to `server`) + `eas deploy --prod --dev-domain <slug> --non-interactive --json`; republish keeps the URL. Run `eas deploy` from a directory that holds only the static `dist/` and a platform-generated `app.json`, on a different machine from the export, to prove the export/deploy split (`08` §5); and confirm with the same marker-file test that `eas deploy` executes nothing from `dist/`.
 - **Pass:** URL stable across two publishes. **Fallback:** static hosting (A13).
 
 ### S6. Backend provider (1 day)
@@ -96,8 +97,8 @@ None.
 - [ ] S1 pass criteria met (screen recording attached), including icons under the production CSP.
 - [ ] S2 report: pass rate, repairs, cost per app (Opus and Sonnet), cache hit ratio, wall-clock p50/p90 (sequential and concurrency 2).
 - [ ] S3: recording on iPhone and Android with store Expo Go via Path B (or A), the chosen connection mechanism recorded, and Path C verified.
-- [ ] S4: APK installed with an EAS-generated keystore under `EAS_NO_VCS=1`; per-project webhook signature verified; build re-fetched.
-- [ ] S5 stable URL across two publishes.
+- [ ] S4: APK installed with an EAS-generated keystore under `EAS_NO_VCS=1`; per-project webhook signature verified; build re-fetched; marker-file test shows no project code ran locally.
+- [ ] S5 stable URL across two publishes; deploy works from a `dist/`-only directory on a separate machine.
 - [ ] S6 two-user privacy check passes, including the anonymous-sign-in case without sign-in screens.
 - [ ] S7 latency, intermediate-response handling, cache-by-path behaviour and unit cost measured.
 - [ ] No spike credentials committed (`.env.spike` gitignored; tokens revoked after).

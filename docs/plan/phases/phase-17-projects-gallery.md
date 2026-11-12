@@ -20,17 +20,17 @@ Replace the home-page placeholder grid with real data. Signed-in users see **the
 **Reference app notes** (`13-reference-implementation.md`, R20)
 - **Live cards (alternative to thumbnails):** the reference app stores no screenshots. Each card runs the app itself in the sandboxed preview frame, non-interactive, loaded when it **nears the viewport** and stopped once scrolled away, so it always shows the latest screens. That's acceptable if you'd rather skip the thumbnail job. Use `IntersectionObserver` with a cap of about 6 live frames at once, and keep the static placeholder as the fallback. Our default stays static thumbnails, for home-page performance (`13` §3).
 - **Visitor list rules:** only `public` projects whose status is **`ready`** (a project mid-build waits until it's done), most recently edited first. The page size is 24 in the reference app. Cards show the **author's display name only, never an email**.
-- **Duplicate and delete wait for the agent:** both are refused (409, "Wait for the current build to finish") while a run is `queued`/`running` for the project. A copy gets the chat, screens and files, but starts private and without a backend.
+- **Duplicate and delete wait for the agent:** both are refused (409, "Wait for the current build to finish") while a run is `queued`/`running` for the project. A member's copy gets the chat text (never `messages.payload.api`), screens and files; a **Remix** by a non-member gets screens and files only, with no chat and no uploaded assets (`08` §2). Either way the copy starts private, without a backend, and its Planner starts a fresh session.
 - **Delete is honest about what it doesn't remove:** it deletes the project's rows and uploaded files, but **not** its published website, GitHub repo, or the backend in the user's provider account. The confirm dialog says so and links to each.
-- Visibility is owner-only, from the share dialog, and only affects the list and the preview route. It never opens the workspace to anyone.
+- Visibility is owner-only, from the share dialog, and only affects the list and the preview route. It never opens the workspace to anyone: visibility never satisfies `requireProjectAccess` (`08` §2).
 - **Amended (D17, ADR-003 #23):** the reference app listed public projects immediately. We list them on the homepage only after admin approval, because the showcase is our brand's front page. A link-only public page (`unlisted`) is immediate.
 
 ## Steps
 
 ### 1. Thumbnail job `thumbnail.render`
 - Enqueued through the `job_outbox` at `run.done` for build/change runs and on `plan.updated` theme switches (debounced 30 s per project).
-- Worker: `materialize({ target: "preview" })` with `plan.backend` stripped (local provider + seed data) → payload JSON in storage → sandbox `POST /jobs/thumbnail` (HMAC per-job token) with a signed GET for the payload and a signed PUT for the output.
-- Sandbox: serves its **bundled `public/preview-runtime/`** (the same build the web app ships) from a local static server on `127.0.0.1`. Playwright loads `harness.html` there, posts the payload over the bridge, renders the first tab route at 390×844 under the production CSP, screenshots it, and uploads `thumbnails/{projectId}/{snapshotId}.png` (+ WebP) to the signed PUT URL. The worker then updates `projects.thumbnail_key`.
+- Worker: `materialize({ target: "preview" })` with `plan.backend` stripped (local provider + seed data) → payload JSON in storage → sandbox `POST /jobs/thumbnail` (signed per-job token, `08` §5) with a signed GET for the payload and a signed PUT for the output.
+- Sandbox: serves its **bundled preview runtime** (the same build the web app ships, plus `harness.html`, which exists only in the sandbox image) from a local static server on `127.0.0.1`. Playwright loads `harness.html` there, posts the payload over the bridge, renders the first tab route at 390×844 under the production CSP, screenshots it, and uploads `thumbnails/{projectId}/{snapshotId}.png` (+ WebP) to the signed PUT URL. The worker then updates `projects.thumbnail_key`.
 - Projects without a thumbnail fall back to a generated placeholder (app name initials on the theme's primary color).
 
 ### 2. Queries
@@ -51,28 +51,28 @@ Replace the home-page placeholder grid with real data. Signed-in users see **the
 | Open | member | `/workspace/:id` |
 | Open in new tab | member | same, `target=_blank` |
 | Rename | editor+ | inline dialog → `PATCH /api/projects/:id { title }` |
-| Duplicate | editor+ (or anyone signed in, for a public/unlisted project: "Remix") | `POST /api/projects/:id/duplicate` → **409 while a run is active**; otherwise a new project owned by the caller: chat, `projects.plan` (minus `backend`), screens and files copied from the latest snapshot, `visibility = private`, no backend/GitHub/builds/web deployment/members copied |
+| Duplicate | editor+ (or any verified signed-in user, for a public/unlisted project that isn't deleted: "Remix") | `POST /api/projects/:id/duplicate` → **409 while a run is active**; otherwise a new project owned by the caller: `projects.plan` (minus `backend`), screens and files copied from the latest snapshot, `visibility = private`, no backend/GitHub/builds/web deployment/members copied. **Members** also get the chat's display text; **`messages.payload.api` is never copied**, and the copy's first Planner turn starts a new session. **Remix copies no messages and no `reference_image` / `chat_attachment` assets** (`08` §2), so the author's prompts stay private and can't steer the remixer's agent |
 | Share | owner | opens the Phase 14 share dialog |
 | Make unlisted / private | owner | `PATCH visibility`; immediate. Unlisted shows a confirmation that code + preview become visible to anyone with the link |
 | Show on homepage | owner | `PATCH visibility = public` → `showcase_status = pending`. Listed only after an admin approves at `/admin/showcase`; unpublish anytime |
 | Export as zip | editor+ | Phase 14 zip job |
-| Delete | owner | **409 while a run is active**; confirm dialog lists what is *not* removed (published website, GitHub repo, backend project) → soft delete (`deleted_at`); hidden everywhere; hard-delete job after 30 days removes rows and uploaded files |
+| Delete | owner | **409 while a run is active**; confirm dialog lists what is *not* removed (published website, GitHub repo, backend project) → soft delete (`deleted_at`); hidden everywhere at once, including the public page, the public files endpoint and Remix; hard-delete job after 30 days removes rows and uploaded files |
 
 Duplicate and delete count against plan limits (Phase 18), checked server-side.
 
 ### 5. Public project page `/p/:projectId`
 - Only for `public` or `unlisted` projects (unlisted: reachable by link, not listed).
 - Shows: title, author display name, description from the plan, screens strip (thumbnails per screen if available), one **interactive preview** iframe in `mode: "interactive"` with `plan.backend` stripped (local provider + seed data, storage `demo:<projectId>`), "Remix this app" (= duplicate into the visitor's account; requires sign-in), and **Open on phone**: a QR code for the Path C browser link (Phase 11). Public pages don't start hosted dev-server sessions; those are paid compute reserved for workspace members.
-- Public code view (read-only file tree), as the video allows. Run the secret scanner (Phase 14) before making a project public, and block if it finds anything.
+- Public code view (read-only file tree), as the video allows. Run the secret scanner (Phase 14) before making a project public, and block if it finds anything. Run it again on each new snapshot of a public/unlisted project before the public endpoint serves it; on a finding, keep serving the previous clean snapshot and tell the owner.
 - SEO: `generateMetadata` with title/description and the thumbnail as the OG image.
 
 ### 5b. Showcase approval queue (admin)
-- `/admin/showcase` (admin role from `user.role = 'admin'`) lists `showcase_status = pending` projects with their public page, secret-scan result and the owner. **Approve** / **Reject** (with a reason emailed to the owner) / **Unlist** later. A "Report" link on public pages creates a pending review again.
+- `/admin/showcase` (admin role from `user.role = 'admin'`) lists `showcase_status = pending` projects with their public page, secret-scan result and the owner. **Approve** / **Reject** (with a reason emailed to the owner) / **Unlist** later. A "Report" link on public pages (rate-limited per IP) adds an entry to the admin queue. It never changes `showcase_status` by itself; only an admin action does.
 
 ### 6. Authz
 - All mutations go through `requireProjectAccess(projectId, role)`.
 - Public endpoints return only whitelisted fields; never `secret_config_enc`, connections, member emails, or build artifact URLs.
-- The public page loads files via a separate read-only endpoint that checks `visibility in ('public','unlisted')` and serves the **latest snapshot**, not in-progress revisions.
+- The public page loads files via a separate read-only endpoint that checks `visibility in ('public','unlisted')` **and `deleted_at is null`** and serves the **latest snapshot**, not in-progress revisions.
 
 ## Files to create / change
 - `worker/handlers/thumbnail-render.ts`, `preview-runtime/harness.html` (shared with the smoke test)
@@ -98,7 +98,7 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 | GET | `/api/public/projects/:id/files` | none (public/unlisted only) | → `{ files: {path, sha, content}[] }` from latest snapshot, materialized with `plan.backend` removed |
 | PATCH | `/api/projects/:id` | editor (title) / owner (visibility) | `{ title?, visibility? }` → project (`visibility = public` sets `showcase_status = pending`) |
 | POST | `/api/admin/showcase/:id/{approve,reject,unlist}` | admin | `{ reason? }` → `{ showcase_status }` |
-| POST | `/api/projects/:id/duplicate` | member (source must be accessible or public) + plan limit | → `{ projectId }` |
+| POST | `/api/projects/:id/duplicate` | editor+ on the source, or any verified user when the source is public/unlisted and not deleted (Remix) + plan limit | → `{ projectId }` |
 | DELETE | `/api/projects/:id` | owner | → `{ ok }` (soft) |
 
 ## Acceptance checklist
@@ -110,6 +110,8 @@ Duplicate and delete count against plan limits (Phase 18), checked server-side.
 - [ ] The thumbnail updates within ~1 min after a build/edit/theme change.
 - [ ] Rename, duplicate, share, visibility toggle, zip export and delete all work from the card menu, with correct role restrictions (tests for viewer/editor/owner/non-member).
 - [ ] Duplicate copies files only (no backend, GitHub, builds, members); the new project opens and renders.
+- [ ] Remix by a non-member copies no messages and no uploaded assets; `messages.payload.api` is never copied or sent to a client (test both).
+- [ ] A soft-deleted public project returns 404 on the public page, the files endpoint and Remix.
 - [ ] The public page preview runs on seed data even when the source project has a connected backend (test asserts `plan.backend` is stripped and `lib/backend/config.ts` selects the local provider); visitor data lives under `demo:<projectId>`.
 - [ ] Making a project public is blocked if the secret scanner finds anything.
 - [ ] Public endpoints never return private fields (snapshot test of response shapes).

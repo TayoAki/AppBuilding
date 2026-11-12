@@ -12,10 +12,11 @@
 Run AppBuilding in production with a custom domain. That means the web app, a long-running **worker**, a separate **sandbox service** for untrusted generated code, managed Postgres, object storage, and every third-party integration pointed at production URLs. Add the operational basics: error tracking, logs, rate limits, backups, spend alerts and rollback.
 
 ## What we do differently from the video (and why)
-- **Three services, not one** (ADR-003 #18). The video deploys only the Next.js app to Vercel and relies on CloudHike Jobs calling back into it. Ours:
+- **Four services, not one** (ADR-003 #18, ADR-005). The video deploys only the Next.js app to Vercel and relies on CloudHike Jobs calling back into it. Ours:
   - **web**: the Next.js app;
   - **worker**: agent, pipelines, outbox dispatcher. No request timeout. It holds DB/AI/provider secrets but never runs generated code;
-  - **sandbox**: `expo export`, Playwright renders/thumbnails, `eas-cli` commands and the Path B Expo dev servers. It has **no DB access and no platform secrets**: only `SANDBOX_TOKEN_SECRET` to verify per-job tokens, and per-job user tokens that are never stored.
+  - **sandbox**: `expo export`, Playwright renders/thumbnails and the Path B Expo dev servers. It runs generated code, so it has **no DB access, no platform secrets and no user tokens**: only the public `SANDBOX_VERIFY_KEY` to verify per-job tokens;
+  - **runner**: the `eas-cli` commands that need the owner's Expo token or ASC key, one fresh container per job. It never runs generated code (`08` §5).
 - **Migrations are a release step.** We generate SQL migrations (`drizzle-kit generate`) during development and apply them (`drizzle-kit migrate`) in CI before the new code goes live.
 - **Separate dev and prod everywhere**: OAuth apps, Stripe modes, buckets, DBs and Anthropic API keys per environment.
 - **Public URL vars set deliberately.** The video had to delete and re-create `NEXT_PUBLIC_APP_URL` because it was stored as a sensitive value. `NEXT_PUBLIC_*` values are inlined at **build** time and aren't secrets: store them as plain vars and **redeploy** after changing them.
@@ -34,7 +35,8 @@ Run AppBuilding in production with a custom domain. That means the web app, a lo
 |---|---|---|
 | Web | Vercel (or a Node service on Railway/Render) | Region close to the DB |
 | Worker | Railway / Fly / Render long-running service | Node 22 image from `worker/Dockerfile`; 1–N replicas; no Chromium/eas-cli needed |
-| **Sandbox** | Railway / Fly / Render service in an isolated project/network | `sandbox/Dockerfile`: Node 22, pinned `eas-cli`, Playwright Chromium, prebuilt `node_modules` per template version (read-only), JDK only if keystore option B. Non-root, ≥ 4 GB RAM per instance (Metro sessions), ephemeral disk ≥ 10 GB. **No DB network access**; egress restricted where the host allows (npm registry, Expo/EAS, ImageKit, storage). Wildcard DNS + TLS for `*.<DEVICE_PREVIEW_BASE_DOMAIN>` if Path B1 is used |
+| **Runner** | Railway / Fly / Render service, separate from the sandbox | `runner/Dockerfile`: Node 22, pinned `eas-cli` (JDK only if keystore option B). **One fresh container per job** (or a fresh OS user + temp dir, wiped afterwards). No DB network access; egress to Expo/EAS and storage only. Never runs Metro, Chromium or `expo export` |
+| **Sandbox** | Railway / Fly / Render service in an isolated project/network | `sandbox/Dockerfile`: Node 22, Playwright Chromium (its own sandbox left on), prebuilt `node_modules` per template version (read-only), `harness.html`. No `eas-cli`. Non-root, each job or session isolated (container, or OS user + network namespace), ≥ 4 GB RAM per instance (Metro sessions), ephemeral disk ≥ 10 GB. **No DB network access**; **egress restricted** to the npm registry, Expo, ImageKit and storage, with loopback, link-local and private ranges blocked. Pick a host that can enforce this (`08` §5). Wildcard DNS + TLS for `*.<DEVICE_PREVIEW_BASE_DOMAIN>` if Path B1 is used; that domain and `PREVIEW_ORIGIN` are on a **separate registrable domain** from the app |
 | Postgres | Managed (Neon, Railway, Supabase, CloudHike, RDS…) | PITR on; **direct (session) connection** for pg-boss, outbox and LISTEN; pooled URL OK for plain queries |
 | Object storage | S3 / R2 / provider bucket | Private; versioning on; CORS for presigned PUT from `NEXT_PUBLIC_APP_URL`; signed URLs are how the sandbox reads and writes |
 | Email | Transactional provider (from Phase 02) | Verification, invites, account notices |
@@ -44,7 +46,7 @@ Run AppBuilding in production with a custom domain. That means the web app, a lo
 - Root `.gitignore`: `node_modules`, `.next`, `.env*` (except `.env.example`), `public/preview-runtime/*.js`, `tmp/`, `.exports/`, `*.tgz`, `dist/`, `web-build/`, `.expo/`, `*.jks`, `credentials.json`, Playwright reports, `spikes/**/.env.spike`. Add a CI check that fails if a PR adds more than ~500 files or any file under these paths.
 
 ### 2. Environment variables checklist
-Per environment (dev / prod). **W** = web, **K** = worker, **S** = sandbox.
+Per environment (dev / prod). **W** = web, **K** = worker, **S** = sandbox. The **runner** gets only `SANDBOX_VERIFY_KEY` and `SENTRY_DSN`.
 
 | Var | W | K | S | Notes |
 |---|---|---|---|---|
@@ -60,20 +62,22 @@ Per environment (dev / prod). **W** = web, **K** = worker, **S** = sandbox.
 | `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` | ✅ | ✅ | ❌ | prod GitHub App |
 | `IMAGEKIT_ENABLED`, `IMAGEKIT_URL_ENDPOINT`, `IMAGEKIT_PRIVATE_KEY` | ✅ | ✅ | ❌ | `06` §7, Phase 12 |
 | `BACKEND_PROVIDER`, `BACKEND_OAUTH_CLIENT_ID`, `BACKEND_OAUTH_CLIENT_SECRET` | ✅ | ✅ | ❌ | prod developer app |
-| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO_MONTHLY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | ✅ | | ❌ | **live** mode only in prod |
+| `STRIPE_SECRET_KEY` | ✅ | ✅ | ❌ | **live** mode only in prod; the worker needs it to re-read subscriptions and to cancel on account deletion |
+| `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO_MONTHLY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | ✅ | | ❌ | **live** mode only in prod |
 | `CREDIT_USD_VALUE`, `CREDIT_MARKUP` | ✅ | ✅ | ❌ | margin report / optional cost-based mode |
 | `DEVICE_PREVIEW_MODE`, `DEVICE_PREVIEW_BASE_DOMAIN` | ✅ | ✅ | ✅ | Phase 11 |
-| `SANDBOX_URL` | | ✅ | | worker → sandbox |
-| `SANDBOX_TOKEN_SECRET` | | ✅ | ✅ | HMAC for per-job tokens; the only secret the sandbox holds |
+| `SANDBOX_URL`, `RUNNER_URL` | | ✅ | | worker → sandbox, worker → runner |
+| `SANDBOX_SIGNING_KEY` | | ✅ | ❌ | Ed25519 private key for per-job tokens |
+| `SANDBOX_VERIFY_KEY` | | | ✅ | the public key (also on the runner); the sandbox holds no secret |
 | `GENERATION_DISABLED`, `DAILY_SPEND_CAP_USD` | ✅ | ✅ | | kill switch (also a `system_flags` row); hard daily model-spend cap |
 | `SENTRY_DSN` | ✅ | ✅ | ✅ | |
-| `PREVIEW_ORIGIN` | ✅ | ✅ | ✅ | separate preview domain or the app origin (`07` §6) |
+| `PREVIEW_ORIGIN` | ✅ | ✅ | ✅ | a **separate registrable domain** from the app in production (`07` §6, `08` §4); never the app origin or a subdomain of it |
 
 There's no `EAS_WEBHOOK_SECRET`: EAS webhook secrets are per project, encrypted in the DB (ADR-003 #17). `lib/env.ts` (Zod) fails fast at boot, per process, and **the sandbox's schema rejects any unexpected secret-looking var**. CI checks that `.env.example` lists every key each schema reads.
 
 ### 3. Database release flow
 - Commit generated migrations under `drizzle/`.
-- CI job on `main`: `drizzle-kit migrate` against prod, **then** deploy web, worker and sandbox. Use expand → migrate → contract for breaking changes, so a code rollback never needs a DB rollback.
+- CI job on `main`: `drizzle-kit migrate` against prod, **then** deploy web, worker, sandbox and runner. Use expand → migrate → contract for breaking changes, so a code rollback never needs a DB rollback.
 - Exclude the `pgboss` schema from Drizzle (`schemaFilter: ["public"]`). Pin the pg-boss major version (ADR-003 #21).
 
 ### 4. Domains and callback URLs
@@ -94,13 +98,14 @@ If the domain ever changes, `scripts/rotate-eas-webhooks.ts` re-creates each pro
 
 ### 5. Security and abuse controls
 - Rate limits (per user + per IP) on: project create, message send, run-starting routes, uploads, invites, device-preview sessions, public endpoints. Use a Postgres token bucket, or Redis at volume.
-- Security headers (CSP for the app shell, HSTS, `frame-ancestors`), cookie flags (`Secure`, `HttpOnly`, `SameSite=Lax`).
-- Anthropic workspace **spend limit** set in the console, plus our `DAILY_SPEND_CAP_USD` check before enqueueing agent runs (sum of today's `ai_usage`).
+- Security headers (CSP for the app shell with no `'unsafe-eval'`, HSTS, `frame-ancestors`), cookie flags (`Secure`, `HttpOnly`, `SameSite=Lax`), and an `Origin` check on state-changing routes. Responses under the preview runtime path carry `Content-Security-Policy: sandbox allow-scripts; …` (`08` §4).
+- Check before go-live: `PREVIEW_ORIGIN` and `DEVICE_PREVIEW_BASE_DOMAIN` don't share a registrable domain with `NEXT_PUBLIC_APP_URL` (boot-time assertion in `lib/env.ts`), and `harness.html` returns 404 on the web app.
+- Anthropic workspace **spend limit** set in the console, plus our `DAILY_SPEND_CAP_USD` check (in place since Phase 06, in `lib/ai/client.ts` before every model call; sum of today's `ai_usage` for the billed user).
 - Admin kill switch: `GENERATION_DISABLED` env or a `system_flags` row → run-starting routes return 503 with a status message.
 
 ### 6. Observability
 - Structured JSON logs (`pino`) with `runId`, `projectId`, `userId` (hashed), job kind and step. Never log tokens, device-preview URLs, prompts with secrets, or file contents.
-- Sentry for exceptions in all three services, with source maps.
+- Sentry for exceptions in all four services, with source maps.
 - Alerts:
   - queue depth and oldest job age per queue (alert if a build waits > 5 min), plus **unsent `job_outbox` rows older than 1 min**;
   - run failure rate per kind (> 10% over 1 h) and stuck steps (no `runs.heartbeat_at` update for 10 min, excluding kinds that wait on external systems);
@@ -150,7 +155,9 @@ Rollback: Vercel instant rollback to the previous deployment; worker and sandbox
 
 ## Acceptance checklist
 - [ ] The production domain serves the app over HTTPS, with HSTS and security headers present.
-- [ ] Web, worker and sandbox run from the same git sha, and Sentry shows releases for all three.
+- [ ] Web, worker, sandbox and runner run from the same git sha, and Sentry shows releases for all four.
+- [ ] `PREVIEW_ORIGIN` and `DEVICE_PREVIEW_BASE_DOMAIN` are on a different registrable domain from the app; `harness.html` is 404 on the web app; the runtime URL opened top-level has an opaque origin.
+- [ ] The sandbox's environment holds no secret and no user token; the runner's holds only the public verify key. From inside the sandbox, the DB, the cloud metadata address and private ranges are unreachable (tested).
 - [ ] CI on `main` applies migrations before deploying; a failing migration blocks the deploy.
 - [ ] Every row of the callback/webhook table is configured and verified by the smoke test.
 - [ ] The sandbox can't reach the DB (connection attempt fails) and has no platform secrets in its env (env dump test against the allowlist).
@@ -173,10 +180,10 @@ Implement the code/config side (I will click through provider dashboards myself)
 1. worker/Dockerfile (Node only) and sandbox/Dockerfile (Node 22, pinned eas-cli, Playwright Chromium,
    prebuilt template node_modules, non-root) + host config for <FILL IN: Railway | Fly | Render>.
 2. CI: lint/typecheck/test on PRs; on main: drizzle-kit migrate, then deploy web + worker + sandbox.
-3. lib/env.ts per-process schemas (web, worker, sandbox); the sandbox schema rejects unexpected
-   secret-looking vars; CI check against .env.example. DATABASE_URL_DIRECT for pg-boss/outbox/LISTEN.
+3. lib/env.ts per-process schemas (web, worker, sandbox, runner); the sandbox and runner schemas reject
+   unexpected secret-looking vars; assert the preview domains are not same-site with the app; CI check against .env.example. DATABASE_URL_DIRECT for pg-boss/outbox/LISTEN.
 3b. Root .gitignore for all build/export/scratch output + CI guard against huge/generated-file PRs.
-4. Structured logging with redaction; Sentry for all three services; /api/health, worker heartbeat,
+4. Structured logging with redaction; Sentry for all four services; /api/health, worker heartbeat,
    sandbox health.
 5. Rate limiting + security headers; GENERATION_DISABLED kill switch; DAILY_SPEND_CAP_USD check.
 6. Alerts: queue age, outbox lag, stuck steps (heartbeat), failure rate, spend, ImageKit units,

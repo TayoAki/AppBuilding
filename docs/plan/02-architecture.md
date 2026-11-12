@@ -8,7 +8,7 @@ Working name: **AppBuilding** (the repo name). Pick the real brand before launch
 
 ## 1. One-paragraph summary
 
-A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The platform saves a **project** and puts a **generation job** on a queue. A separate **worker** process picks up the job and runs the **AI agent** (Claude via the Anthropic TypeScript SDK). The agent first proposes a **plan** (the screens to build). Once the user confirms, it writes **React Native / Expo source files** into the project's **virtual file system**, which lives in Postgres. The worker streams **events** back to the browser on a project-scoped stream. Anything that runs generated code on our servers (`expo export`, headless renders, device-preview dev servers) runs in a separate **sandbox service** with no secrets. The browser shows the files live on a **canvas** of phone frames and in an interactive **preview**. Both run in a sandboxed **preview runtime** (react-native-web inside an iframe). From there the user can edit through chat or a visual inspector, open the app on a real phone in **Expo Go** (via a hosted Expo dev server; Snack when it supports the SDK), connect a **backend** for the generated app, **export** it (zip / GitHub), **build** store binaries (EAS Build) and **publish** it to the web (EAS Hosting).
+A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The platform saves a **project** and puts a **generation job** on a queue. A separate **worker** process picks up the job and runs the **AI agent** (Claude via the Anthropic TypeScript SDK). The agent first proposes a **plan** (the screens to build). Once the user confirms, it writes **React Native / Expo source files** into the project's **virtual file system**, which lives in Postgres. The worker streams **events** back to the browser on a project-scoped stream. Anything that runs generated code on our servers (`expo export`, headless renders, device-preview dev servers) runs in a separate **sandbox service** with no secrets; steps that need a person's Expo credentials run in a separate **runner service** that never runs generated code (`08` §5). The browser shows the files live on a **canvas** of phone frames and in an interactive **preview**. Both run in a sandboxed **preview runtime** (react-native-web inside an iframe). From there the user can edit through chat or a visual inspector, open the app on a real phone in **Expo Go** (via a hosted Expo dev server; Snack when it supports the SDK), connect a **backend** for the generated app, **export** it (zip / GitHub), **build** store binaries (EAS Build) and **publish** it to the web (EAS Hosting).
 
 ---
 
@@ -48,17 +48,23 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 │  ├─ agent.chat (Planner) / agent.step (generators) → Anthropic   │
 │  ├─ export.github     → GitHub API (Contents + Git Data API)     │
 │  ├─ build.native      → EAS Build (owner's Expo token)           │
-│  ├─ publish.web       → sandbox export → EAS Hosting deploy      │
+│  ├─ publish.web       → sandbox export → runner: EAS deploy      │
 │  ├─ backend.provision → backend provider API (per generated app) │
 │  └─ device.session    → asks the sandbox for a dev server        │
 └───────────────┬──────────────────────────────────┬───────────────┘
                 │ HTTPS: per-job token +           │
                 │ signed storage URLs              │
 ┌───────────────▼──────────────────────┐           │
-│  Sandbox service (NO secrets, NO DB) │           │
+│  Sandbox service (NO secrets, NO DB, │           │
+│   NO user tokens; runs generated code)│          │
 │  ├─ Playwright renders / thumbnails  │           │
 │  ├─ `expo export -p web`             │           │
 │  └─ Path B Expo dev servers ◀── Expo Go on phones (session URL)
+└──────────────────────────────────────┘           │
+┌──────────────────────────────────────┐           │
+│  Runner service (per-job Expo token; │           │
+│   never runs generated code)         │           │
+│  └─ eas-cli: init, build, deploy     │           │
 └──────────────────────────────────────┘           │
                                                    ▼
      Object storage (S3-compatible): uploads, assets, project tarballs, zips, thumbnails
@@ -81,6 +87,8 @@ A **Next.js web app** (the "platform") lets a signed-in user type a prompt. The 
 | A9 | **Provider adapters** for every third-party dependency: `StorageProvider`, `BackendProvider` (generated apps), `ImageProvider`, `BuildProvider`, `HostingProvider`, `BillingProvider`. | The video ties every layer to one sponsor (CloudHike). Adapters let you start with any vendor and switch without touching the agent or UI. | Hard-wired to CloudHike |
 | A10 | **All third-party tokens are encrypted at rest** (AES-256-GCM, versioned key), and **every project route goes through `requireProjectAccess()`**. | These are the classic AI-builder bugs: leaked OAuth tokens and IDOR on project IDs. | Added an encryption key later; CodeRabbit flagged ownership issues |
 | A11 | **A sandbox service with no secrets and no DB access** runs every step that processes generated code on our servers (renders, `expo export`, device-preview dev servers). | Generated code is untrusted. The worker holds secrets, so it must never run it (`08` §5). | Not discussed |
+| A12 | **A runner service for credentialed `eas-cli` steps**, one fresh container per job, that never runs generated code (ADR-005). | The owner's Expo token and App Store Connect key are account-wide. They must not sit on a machine that also runs other people's generated code, dev servers or a browser. | Not discussed |
+| A13 | **Generated code is never served from, or same-site with, the platform origin.** Runtime documents carry a `sandbox` CSP header; preview and device-preview hosts are on a separate registrable domain; the render harness ships only in the sandbox image (`08` §4). | A sibling subdomain receives `SameSite=Lax` cookies, and a page on the platform origin that runs posted code is account takeover. | Not discussed |
 
 ---
 
@@ -99,7 +107,7 @@ Worker: agent.chat (Planner, see 05 §3)
   → streams prose (assistant.delta) → calls propose_plan(AppPlan)
   → server validates + caps plan → plan_card message → projects.plan (draft) → plan.ready
 User: "only first 3 screens" → POST /api/projects/:id/messages → agent.chat → propose_plan again
-User: [Confirm & build]  (or "looks good" → confirm_plan)
+User: [Confirm & build]  ("looks good" → confirm_plan only highlights the button; the click starts the build)
   → one txn: charge credits (ledger charge:<runId>) + run(kind=build, credits_charged)
              + job_outbox "agent.step" {runId, projectId, userId, step:"foundation"}
 Worker: agent.step chain (one job per step, each enqueues the next; 05 §4)
@@ -129,8 +137,8 @@ Canvas iframes receive file revisions → hot-swap modules → re-render
 All four start the same way: the project is **materialized** (template files plus project files) into a tarball in storage or an in-memory tree for GitHub. Steps that run generated code go to the sandbox service.
 - Zip: stream to storage → signed download URL.
 - GitHub: the first push goes to the default branch **only if the repo is empty**; it creates the first commit with the Contents API (or the repo is created with `auto_init`), because the Git Data API returns 409 on an empty repo. After that, Git Data API (blobs → tree → commit), always on a new branch `appbuilding/update-<ts>` with a PR.
-- Native build (owner-only): `EAS_NO_VCS=1 eas build --non-interactive --no-wait --json` with the **owner's** Expo token. Status arrives via the project's EAS webhook (per-project secret), which is re-verified by fetching the build from EAS. The run ends at submit; status lives in `native_builds`.
-- Web (owner-only): the sandbox runs `npx expo export -p web` (`web.output: "single"`), then `eas deploy --prod --dev-domain <slug>` (EAS Hosting) with the owner's token → stable public URL.
+- Native build (owner-only, in the **runner**): `EAS_NO_VCS=1 eas build --non-interactive --no-wait --json` with the **owner's** Expo token. Status arrives via the project's EAS webhook (per-project secret), which is re-verified by fetching the build from EAS. The run ends at submit; status lives in `native_builds`.
+- Web (owner-only): the sandbox runs `npx expo export -p web` (`web.output: "single"`) with no token and uploads the static `dist/`; then the **runner** runs `eas deploy --prod --dev-domain <slug>` (EAS Hosting) with the owner's token → stable public URL.
 
 ---
 
@@ -173,7 +181,8 @@ All four start the same way: the project is **materialized** (template files plu
 ├─ worker/
 │  ├─ index.ts (outbox dispatcher + pg-boss createQueue/work for all handlers)
 │  └─ handlers/ (agent-chat.ts, agent-step.ts, device-session.ts, snack-sync.ts, export-*.ts, …)
-├─ sandbox/                separate service: NO secrets, NO DB (08 §5)
+├─ runner/                 separate service: eas-cli steps with a per-job user token; never runs generated code (08 §5)
+├─ sandbox/                separate service: NO secrets, NO DB, NO user tokens (08 §5)
 │  ├─ server.ts (POST /jobs with per-job token; render, export-web, devserver start/stop/update)
 │  └─ Dockerfile (Node 22, Chromium, cached template node_modules, public/preview-runtime)
 ├─ preview-runtime/        separately bundled; served as static assets
@@ -193,10 +202,11 @@ All four start the same way: the project is **materialized** (template files plu
 |---------|-----------|------------|
 | Web | `npm run dev` (Next.js) | Vercel (or Railway/Render Node service) |
 | Worker | `npm run worker` (tsx watch) | Railway / Fly / Render long-running service: Node 22+, `eas-cli`, writable temp disk. Holds secrets; never runs generated code. A JDK is needed only if you use the `keytool` keystore fallback. |
-| Sandbox | `npm run sandbox` (local, same machine) | Separate Railway / Fly / Render service: Node 22+, Chromium (Playwright), cached SDK 58 template `node_modules`, the built `public/preview-runtime/`, Expo CLI for dev servers. **No secrets, no DB access**; reached only by the worker (`SANDBOX_URL` + per-job tokens signed with `SANDBOX_TOKEN_SECRET`) and, for device sessions, by phones on per-session URLs. Restrict egress where the host allows. |
+| Sandbox | `npm run sandbox` (local, same machine) | Separate Railway / Fly / Render service: Node 22+, Chromium (Playwright), cached SDK 58 template `node_modules`, the built preview runtime plus `harness.html` (which ships only here), Expo CLI for dev servers. **No secrets, no DB access**; reached only by the worker (`SANDBOX_URL` + per-job tokens the worker signs with `SANDBOX_SIGNING_KEY`; the sandbox holds only the public `SANDBOX_VERIFY_KEY`) and, for device sessions, by phones on per-session URLs. No user tokens either: credentialed `eas-cli` steps run in the runner. Each job or session is isolated, and egress is restricted (`08` §5). |
 | DB | Docker Postgres or a hosted dev DB | Managed Postgres (Neon, Railway, Supabase, CloudHike …). pg-boss and SSE `LISTEN` need a **direct/session-mode** connection (`DATABASE_URL_DIRECT`); transaction-mode poolers break `LISTEN`. |
 | Storage | MinIO (docker) or hosted bucket | S3 / R2 / Railway bucket / CloudHike storage |
-| Preview runtime origin | `http://localhost:3000/preview-runtime/` loaded into `sandbox="allow-scripts"` iframes (opaque origin) | Same, or a separate domain like `preview.<brand>.com` for defense-in-depth |
+| Runner | `npm run runner` (local, same machine) | Separate Railway / Fly / Render service: Node 22+, pinned `eas-cli`. One fresh container (or OS user + temp dir) per job. Receives the owner's Expo token per job; **never runs generated code**, no Metro, no Chromium. No DB access, no platform secrets. |
+| Preview runtime origin | `http://localhost:3000/preview-runtime/` loaded by URL into `sandbox="allow-scripts"` iframes (opaque origin), with a `sandbox` CSP header on the responses | Same files served from `PREVIEW_ORIGIN` on a **separate registrable domain** (not a subdomain of the app; `08` §4). Device-preview hosts follow the same rule. |
 
 Tunnels such as ngrok are needed **only** for inbound third-party webhooks (Stripe/EAS) and OAuth callbacks when you test them locally. The job system does not need them. Path B device preview may use Expo's own `--tunnel` inside the sandbox if spike S3 picks that mechanism; that's a sandbox concern, not a dev-machine requirement.
 

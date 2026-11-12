@@ -57,14 +57,15 @@ export interface ImageProvider {
 
 ### 2. ImageKit adapter (`lib/providers/images/imagekit.ts`)
 - `generationUrl(description, name)` = `{IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-<encoded>/<projectId>/<name>-<salt>.jpg`. Sanitize the description: strip control characters, newlines, commas, slashes, colons and quotes (IMAGE_RULES); collapse whitespace; **cap at 200 chars**; percent-encode (spaces as `%20`). The `<salt>` in the filename is what makes **regeneration** produce a new image, because ImageKit caches by path.
-- `finalize`: sign the URL, then poll with backoff (≤ 60 s) while the response carries **`is-intermediate-response: true`** (or isn't an `image/*` content-type), until a real image arrives. Upload or copy the result into the project's folder in the ImageKit media library and return a signed URL with a long expiry, or an unguessable path, because the URL ends up in exported code.
+- `isGenerationUrl(u)` is true only when `u` is `https`, its host equals the `IMAGEKIT_URL_ENDPOINT` host, and its path is `/ik-genimg-prompt-…/<this projectId>/…`. Anything else is not fetched.
+- `finalize`: sign the URL, then poll (redirects disabled, response size and time capped) with backoff (≤ 60 s) while the response carries **`is-intermediate-response: true`** (or isn't an `image/*` content-type), until a real image arrives. Upload or copy the result into the project's folder in the ImageKit media library and return a signed URL with a long expiry, or an unguessable path, because the URL ends up in exported code.
 - `transform`: AI edit or background removal on an existing image, saved as **its own file** in the project folder.
 - Dedupe: `seedKey = hash(projectId, normalizedDescription, name)`. An existing `project_assets` row with the same `seed_key` returns its URL with no new generation.
 
 ### 3. Server post-processing in generator steps (`lib/images/postprocess.ts`)
 - Runs in `agent.step` after validation and **before** a screen, component or data file is saved:
   1. Collect string literals with `isGenerationUrl` from the file AST (and from `items` of collections in foundation/data steps).
-  2. Apply the plan and budget: Free → all placeholders. Pro → keep up to the build's remaining image allowance (8 per build, 4 per screen file), already charged in the build estimate; replace the rest with placeholders.
+  2. Apply the plan and budget: Free → all placeholders. Pro → in a **build**, keep up to the build's remaining image allowance (8 per build, 4 per screen file), already charged in the build estimate. In a **change round**, keep up to 4, and charge 4 credits for each one kept in this step's transaction (`charge:<runId>:images`, Phase 18); if the balance or the daily image cap doesn't cover them, use placeholders. Replace the rest with placeholders.
   3. `finalize` in parallel (`p-limit(4)`). On failure, retry once with a simplified description, then use a placeholder.
   4. Rewrite the literals to the final URLs (deterministic codemod), and insert `project_assets` rows (`kind: app_image`, `external_url`, `prompt`, `provider`, `provider_ref`, `seed_key`).
 - Emit `file.writing` progress ("Preparing 3 images…") so the wait is visible.
@@ -72,7 +73,7 @@ export interface ImageProvider {
 
 ### 4. Inspector image actions (Phase 10 shell)
 - When the selected element is an `Image` with a literal `source={{ uri: "…" }}`:
-  - **Replace image**: paste a URL or pick a project asset (user upload). The server transforms or resizes it into the project folder.
+  - **Replace image**: paste a URL or pick a project asset (user upload; `assetId` must belong to this project). The server fetches a pasted URL under the rules in `08` §6: `https` only, the host resolved and refused if it's loopback, link-local or private (checked on the address actually connected to), no redirects, 10 MB and 10 s caps, image MIME sniffed, then re-encoded into the project folder. The fetch runs in the worker with no credentials attached.
   - **Generate AI image**: a prompt → `POST /images/generate` → `generate` + `finalize` (the server waits) → returns the URL.
   - **Apply AI transformation**: a prompt or "remove background" → `POST /images/transform` → new file → URL.
 - The returned URL is applied as `edit.override {afid, imageUri}` in every frame, then persisted through `POST /api/projects/:id/files/edits` (`setProp source.uri`), like any inline edit.
@@ -110,8 +111,8 @@ lib/env.ts                                    (+ IMAGEKIT_* — private key serv
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
 | POST | `/api/projects/:id/images/generate` | editor | `{ prompt, name? }` → `{ url, assetId }` (waits for the image; 4 credits; 402 out of credits / plan gate in Phase 18) |
-| POST | `/api/projects/:id/images/transform` | editor | `{ sourceUrl, prompt?, removeBackground? }` → `{ url, assetId }` (4 credits with prompt, 1 for background removal) |
-| POST | `/api/projects/:id/images/replace` | editor | `{ url? , assetId? }` → `{ url }` |
+| POST | `/api/projects/:id/images/transform` | editor | `{ sourceUrl, prompt?, removeBackground? }` (`sourceUrl` must be one of this project's `project_assets` URLs) → `{ url, assetId }` (4 credits with prompt, 1 for background removal) |
+| POST | `/api/projects/:id/images/replace` | editor | `{ url? , assetId? }` → `{ url }` (`url` fetched under the `08` §6 rules; `assetId` bound to this project) |
 
 ## Acceptance checklist
 - [ ] With `IMAGEKIT_ENABLED=true`, prompting "a grocery store app for online selling" produces product cards with relevant images (banana, strawberries, milk …) in preview and in Expo Go, and no "preparing" placeholders.

@@ -20,7 +20,7 @@ Better Auth owns `user`, `session`, `account`, `verification`. Generate them wit
 |---|---|---|
 | `plan` | `text` default `'free'` | `free` \| `pro` (denormalized from subscription for fast gating) |
 | `credits_balance` | `bigint` default `0` | never-expiring credits (signup grant, refunds, top-ups); cache of its ledger sum |
-| `role` | `text` default `'user'` | `user` \| `admin` (admin pages: showcase approval, unpublish, kill switch) |
+| `role` | `text` default `'user'` | `user` \| `admin` (admin pages: showcase approval, unpublish, kill switch). Set only by `scripts/grant-admin.ts`; never client-writable (`input: false`, `08` §2) |
 | `monthly_credits_balance` | `bigint` default `0` | Pro monthly allowance; **spent first**; replaced on renewal, zeroed when Pro ends (Phase 18) |
 | `onboarded_at` | `timestamptz` null | |
 
@@ -69,8 +69,8 @@ User uploads (reference images) and generated assets.
 Uploads made **before** a project exists (the home prompt box) don't create rows. They go to `tmp/{userId}/{uploadId}` with an HMAC upload token, and `POST /api/projects` verifies them, copies them to final keys and inserts `project_assets` rows in the same transaction as the project (Phase 03). A bucket lifecycle rule expires `tmp/` after 1 day. `pending_upload` is only used for attachments added inside an existing project (chat, Phase 09).
 
 ### `project_members` (Phase 14)
-| `project_id` | `user_id` null | `email` | `role` (`viewer`/`editor`) | `invited_by` | `invite_token_hash` | `invite_expires_at` | `accepted_at` |
-Unique (project_id, email). The owner is implicit via `projects.owner_id`.
+| `project_id` | `user_id` null | `email` | `role` (`viewer`/`editor`) | `invited_by` | `invite_token_hash` | `invite_expires_at` | `accepted_at` | `daily_credit_cap` int default 50 |
+Unique (project_id, email). The owner is implicit via `projects.owner_id`. Access checks match on `user_id`, never on `email`; the invite token is single-use and bound to the email and role (`08` §2). `daily_credit_cap` limits how many of the owner's credits an editor can spend per day.
 
 ## 3. Conversation (Phase 06)
 
@@ -82,7 +82,7 @@ Unique (project_id, email). The owner is implicit via `projects.owner_id`.
 | `run_id` | fk null | the run that produced / was triggered by this message |
 | `role` | text | `user` · `assistant` · `system_note` |
 | `kind` | text | `text` · `plan_card` · `build_summary` · `error` · `element_ref` · `session_break` (Start new session; the Planner replays only messages after the last one) |
-| `content` | text | markdown text shown in chat |
+| `content` | text | markdown text shown in chat; rendered with raw HTML off, `https:` / `mailto:` links only, no remote images (`08` §4) |
 | `payload` | jsonb | e.g. `AppPlan` for plan cards; `{afid, file, snippet}` for element refs |
 | `attachments` | jsonb | asset ids |
 | `prompt_version` | text null | Planner prompt + tool-set version of the session (set on each Planner turn). If the deployed version differs from the latest message's, the server inserts a `session_break` before the next turn (ADR-003 #1) |
@@ -190,7 +190,7 @@ One table for every third-party account the user links.
 Unique (user_id, provider).
 
 ### `project_backends` (Phase 13)
-| `project_id` pk | `provider` | `mode` (`direct` = provider client + RLS with auth always deployed and anonymous sign-in · `gateway` = platform `/api/apps/[id]/…`) | `external_project_id` | `public_config` jsonb (URL + **publishable** key: safe to ship in the app) | `secret_config_enc` (secret/service keys and `db_pass`: never shipped) | `services` jsonb (`[{type, status}]`) | `schema_version` int | `status` (`connecting` · `provisioning` · `ready` · `failed` · `reconnect_required`) | `error` |
+| `project_id` pk | `provider` | `mode` (`direct` = provider client + RLS with auth always deployed and anonymous sign-in · `gateway` = platform `/api/apps/[id]/…`) | `external_project_id` | `public_config` jsonb (URL + **publishable** key: safe to ship in the app) | `secret_config_enc` (secret/service keys and `db_pass`: never shipped) | `install_token_secret_enc` (gateway mode: per-project key that signs install tokens) | `external_org_id` (the provider organization the owner chose) | `confirmed_shared` text[] (collections the owner confirmed as readable by all app users) | `services` jsonb (`[{type, status}]`) | `schema_version` int | `status` (`connecting` · `provisioning` · `ready` · `failed` · `reconnect_required`) | `error` |
 
 ### `device_sessions` (Phase 11, Path B)
 | `id` | `project_id` | `started_by` | `mode` (`devserver` \| `snack`) | `sandbox_instance` | `url` (exp:// URL shown as QR; unguessable) | `status` (`starting` · `ready` · `stopped` · `failed`) | `clients` jsonb (if the dev server reports them) | `last_activity_at` | `error` |

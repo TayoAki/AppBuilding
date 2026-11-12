@@ -105,7 +105,7 @@ drizzle/0002_projects.sql
 |---|---|---|---|
 | POST | `/api/uploads/presign` | user | `{files[{name,size,type}]}` → `{uploads[{uploadId,uploadToken,url,headers}]}` |
 | POST | `/api/projects` | user | `{prompt, platforms, uploads[{uploadId,uploadToken}]}` → `201 {projectId, runId}` · `422 {rejected:[uploadId]}` |
-| GET | `/api/projects/:id/assets/:assetId` | viewer | 302 to a short-lived presigned GET |
+| GET | `/api/projects/:id/assets/:assetId` | viewer | 302 to a short-lived presigned GET; 404 unless the asset's `project_id` is `:id` (`08` §2) |
 
 ## Acceptance checklist
 - [ ] Submitting with 2 images shows per-file progress, then lands on `/workspace/{id}` with the prompt and thumbnails.

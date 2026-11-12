@@ -6,7 +6,7 @@
 | Branch | `feat/07-template-and-preview-runtime` |
 | Depends on | Phase 00b (G0 passed; S1 runtime code + fixture already in `preview-runtime/`), Phase 04 (workspace layout, `screens` table), Phase 05 (project event stream, `file.written` / `plan.updated`) |
 | Effort (solo dev + Claude Code) | ~3–5 days. The ~3-day runtime spike now runs earlier, as S1 in Phase 00b, and its fixture + findings are reused here. |
-| New env vars | `PREVIEW_ORIGIN` (optional; defaults to sandboxed `srcdoc` iframes) |
+| New env vars | `PREVIEW_ORIGIN` (origin the runtime document is loaded from; defaults to the app origin in dev; a separate registrable domain in production, `08` §4) |
 
 ## Goal
 Build the three things every later phase stands on:
@@ -63,7 +63,7 @@ Build the three things every later phase stands on:
 
 ### 7. Virtual file system `lib/vfs`
 - Drizzle tables `project_files`, `file_revisions`, `project_snapshots` (`03` §5). `screens` already exists from Phase 04; don't recreate it.
-- `lib/vfs/paths.ts`: `assertWritable(path, author)` enforces `06` §3. Agents may write only `app/(tabs)/<id>.tsx`, `app/<id>.tsx` and `components/<Name>.tsx` (PascalCase). It also normalizes POSIX paths and rejects `..`, absolute paths, NUL bytes and every platform-rendered path.
+- `lib/vfs/paths.ts`: `assertWritable(path, author)` enforces `06` §3. Agents may write only `app/(tabs)/<id>.tsx`, `app/<id>.tsx` and `components/<Name>.tsx` (PascalCase). It also normalizes POSIX paths and rejects `..`, absolute paths, NUL bytes, every platform-rendered path, and Node-side route files (`+api`, `+html`, `+middleware`, any name containing `+`). Screen ids are kebab-case at the schema level. The same checks run again wherever files are written to a real disk (`materialize`, sandbox unpack and session updates), which also refuse symlinks and hard links (`08` §5).
 - `lib/vfs/files.ts`: `readFile`, `listFiles`, `writeFile({projectId, path, content, author, runId})` (sha256, no-op skip, revision + pointer update in one transaction), `deleteFile` (soft).
 - `lib/vfs/materialize.ts`: `materialize(projectId, {target, snapshotId?})` per `06` §10. `preview` = project files + rendered platform files. `export` adds configs, README and assets. `snack`, `eas` and `web` are **stubs that throw "not yet implemented"** until Phases 11, 15 and 16.
 - Unit tests: traversal rejection, ownership rules (agent can't write `theme/themes.ts`, `data/schema.ts`, `app/_layout.tsx` or `lib/backend/*`), the revision chain, no-op writes, and deterministic rendering (render twice → identical bytes).
@@ -79,7 +79,8 @@ S1 already proved 8a–8h (gate G0). This step turns the spike code into product
 - 8g. Hot swap: textarea edit → `file.update` → module invalidation → re-render in < 300 ms.
 - 8h. Inspector Babel plugin (`07` §5) stamps `dataSet={{afid: "<path>:<line>:<col>"}}` on RN host elements and app components. A click logs `element.select`. `edit.override` handling is stubbed (Phase 10).
 - 8i. Production CSP on the runtime document: `default-src 'none'; script-src <runtime origin> 'unsafe-eval'; style-src 'unsafe-inline'; font-src <runtime origin> data:; img-src https: data: blob:; connect-src <backend URL when connected>` (ADR-003 #15). Ionicons must render under it.
-- 8j. **Harness for server-side renders:** `public/preview-runtime/harness.html` renders each route in turn from files posted to it. Phase 08's smoke test and Phase 17's thumbnails load it in the **sandbox service** from a local static server over the bundled `public/preview-runtime/` (ADR-003 #18), never from the web app's origin.
+- 8j. **Harness for server-side renders:** `sandbox/static/harness.html` renders each route in turn from files posted to it, inside the same sandboxed iframe and CSP as production. Phase 08's smoke test and Phase 17's thumbnails load it in the **sandbox service** from a local static server over the bundled runtime (ADR-003 #18). **It is never built into the web app's `public/`** and never reachable on the web app's origin (`08` §4); a CI check fails if `public/` contains it.
+- 8k. **Response headers for the runtime path:** `Content-Security-Policy: sandbox allow-scripts; <policy from 07 §6>` and `Access-Control-Allow-Origin: *` on everything under `/preview-runtime/`. The iframe loads the runtime by URL from `PREVIEW_ORIGIN`, not `srcdoc`.
 - Tests: loader resolution, router shim (push/replace/back, params, tabs), bridge message validation (bad messages ignored), transpile cache, `afid` stamps on the fixture, CSS-variable theme switch, icons under CSP.
 
 ### 9. Wire the workspace to real files
@@ -109,7 +110,7 @@ preview-runtime/src/shims/{expo-router.tsx,async-storage.ts,expo-haptics.ts,expo
                            expo-status-bar.ts,safe-area-context.tsx}
 preview-runtime/src/inspector-plugin.ts
 preview-runtime/fixtures/habit-tracker/{plan.json,app/**,components/**}
-preview-runtime/build.mjs              → public/preview-runtime/* (incl. harness.html)
+preview-runtime/build.mjs              → public/preview-runtime/* (runtime only) and sandbox/static/harness.html
 preview-runtime/**/*.test.ts
 components/canvas/{Canvas.tsx,PhoneFrame.tsx}
 components/workspace/{InteractivePreview.tsx,CodeView.tsx}
@@ -147,6 +148,7 @@ No write API for file contents yet. Writes come from the generators (Phase 08), 
 - [ ] Clicking an element logs an `afid` mapping to the correct `path:line:col`.
 - [ ] Ionicons (tab bar and screen icons) render inside a sandboxed frame **under the production CSP** (`font-src <runtime origin> data:`); a test asserts icon glyphs aren't blank.
 - [ ] `harness.html` renders every fixture route headlessly (Playwright, run locally the same way the sandbox service will).
+- [ ] `harness.html` is absent from the web build (`public/`), and opening the runtime URL top-level in a signed-in browser shows an opaque origin with no access to the app's cookies or storage (Playwright test).
 - [ ] **Security:** iframes have `sandbox="allow-scripts"`, no `allow-same-origin`. Fixture code can't read the parent's cookies or `fetch('/api/projects')` with credentials (test asserts it).
 - [ ] **AuthZ:** file and screen routes return 404 for non-members (two-user test).
 - [ ] With 10 frames, off-screen frames aren't live iframes, and panning stays smooth on a mid-range laptop.

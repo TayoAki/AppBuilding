@@ -6,7 +6,7 @@
 | Branch | `feat/11-device-preview-qr` |
 | Depends on | Phase 07 (template on SDK 58, `materialize()`), Phase 08 (generated apps, sandbox service), Phase 10 (inline edits arrive as revisions), Phase 00b S3 (connection mechanism chosen) |
 | Effort (solo dev + Claude Code) | ~4–6 days (Path B hosted dev server + Path C fallback; Path A Snack adds ~1–2 days if/when enabled) |
-| New env vars | `DEVICE_PREVIEW_MODE` (`devserver` \| `snack`, default `devserver`), `DEVICE_PREVIEW_BASE_DOMAIN` (e.g. `devpreview.<brand>.com`), plus the sandbox service vars from Phase 08 (`SANDBOX_URL`, `SANDBOX_TOKEN_SECRET`) |
+| New env vars | `DEVICE_PREVIEW_MODE` (`devserver` \| `snack`, default `devserver`), `DEVICE_PREVIEW_BASE_DOMAIN` (a **separate registrable domain** from the app, e.g. `brand-devpreview.dev`, never a subdomain of the app's domain; `08` §4), plus the sandbox service vars from Phase 08 (`SANDBOX_URL`, `SANDBOX_SIGNING_KEY`, `SANDBOX_VERIFY_KEY`) |
 
 ## Goal
 The App Preview header gets a **Scan QR Code** button. Its popover shows a QR code that opens the current project in **Expo Go** on a real phone, plus connection status. When the agent, the inline editor, the code editor or a theme switch changes anything, connected phones **live-reload without rescanning**. If Expo Go can't open the app, **Open in browser** shows it in the phone's browser. Expo Go is always offered first, for native features. The app runs against whatever backend is configured: device storage by default, the connected backend after Phase 13.
@@ -36,20 +36,20 @@ The App Preview header gets a **Scan QR Code** button. Its popover shows a QR co
 - It's packed as a tarball uploaded to storage. The sandbox gets a signed GET URL (it has no DB or storage credentials, ADR-003 #18).
 
 ### 2. Sandbox: dev server sessions (`sandbox/devserver/*`)
-- `POST /sessions` (HMAC-signed by the worker with `SANDBOX_TOKEN_SECRET`, per-job token): `{ sessionId, tarballUrl, templateVersion }` →
-  - unpack to `/sessions/<id>/`; link the **prebuilt `node_modules`** for the template version (read-only cache; never `npm install` agent-influenced deps);
+- `POST /sessions` (signed per-job token from the worker, `08` §5): `{ sessionId, tarballUrl, templateVersion }` →
+  - unpack to `/sessions/<id>/` (rejecting absolute paths, `..`, symlinks and hard links); each session runs in its own container, or at least under its own OS user and network namespace, so one session can't read another's files or reach its Metro port (`08` §5); link the **prebuilt `node_modules`** for the template version (read-only cache; never `npm install` agent-influenced deps);
   - start `npx expo start --port <p>` as an unprivileged user with an env allowlist. **Don't set `CI=1`**: in CI mode Metro disables reloads (verify in S3);
   - expose it to phones with the mechanism S3 chose (record it in an ADR):
-    - **B1 (default):** a reverse-proxy subdomain `d-<sessionId>.<DEVICE_PREVIEW_BASE_DOMAIN>` → Metro port, with `EXPO_PACKAGER_PROXY_URL=https://d-<sessionId>.<…>` so the manifest's bundle URLs point at the proxy. QR = the `exp://`/`exps://` URL S3 confirmed Expo Go accepts;
+    - **B1 (default):** a reverse-proxy subdomain `d-<sessionId>.<DEVICE_PREVIEW_BASE_DOMAIN>` → Metro port, with `EXPO_PACKAGER_PROXY_URL=https://d-<sessionId>.<…>` so the manifest's bundle URLs point at the proxy. **The proxy forwards only the paths Expo Go needs** (manifest, bundle, assets, hot-reload socket; list from S3) and returns 404 for everything else, including Metro's debugger, inspector, symbolicate and open-in-editor endpoints and the web build. QR = the `exp://`/`exps://` URL S3 confirmed Expo Go accepts;
     - **B2:** `expo start --tunnel` (Expo's ngrok-based tunnel). It's simpler but depends on a third party;
   - respond `{ url: "exp://…", expiresAt }`.
-- `PUT /sessions/:id/files` `{ files: [{path, content|null}] }`: writes only changed files. Metro's watcher triggers **Fast Refresh** on connected Expo Go clients.
+- `PUT /sessions/:id/files` `{ files: [{path, content|null}] }`: writes only changed files, after the same path checks as unpack (inside the session dir, allowed tree only, no links). Metro's watcher triggers **Fast Refresh** on connected Expo Go clients.
 - `GET /sessions/:id/status`: `{ running, devices: n | null, lastLogs[] }`. Devices are counted from proxy websocket connections (HMR/message sockets). Device logs and errors come from Metro output (`client_log`). Verify both in S3; if either is unavailable, hide that indicator.
 - `DELETE /sessions/:id`: kills the process and deletes the dir.
 - **Lifecycle:** stop when there's been no workspace heartbeat for 5 min **and** no device connected for 5 min, or on hard max (Free 30 min, Pro 2 h, renewable from the UI). Caps: about 4 sessions per 4 GB sandbox instance. Per user: Free 1 concurrent, Pro 2 concurrent. Over capacity → "Preview servers are busy, try again in a minute," with the browser fallback offered.
 
 ### 3. Platform orchestration
-- `POST /api/projects/:id/device-preview` (viewer): plan gate + caps → insert `device_sessions` row → worker job `devpreview.start` (single-shot wrapper) → materialize → sandbox `POST /sessions` → `{ sessionId, url }` back to the client via the project event stream (`device.ready`).
+- `POST /api/projects/:id/device-preview` (viewer): plan gate + caps → insert `device_sessions` row → worker job `devpreview.start` (single-shot wrapper) → materialize → sandbox `POST /sessions` → `device.ready {sessionId}` on the project event stream, **without the URL**. Clients then read the URL from `GET /api/projects/:id/device-preview` (members only, re-authorized on each call). The URL is a capability and events are persisted for 30 days, so it never goes into `run_events`.
 - The workspace sends `POST /api/projects/:id/device-preview/:sid/heartbeat` every 60 s while the popover or workspace is open.
 - **Live updates:** the workspace already receives `file.written` (agent, `user_inline`, `user_code`) and `plan.updated` (themes, layouts, schema) on the **project-scoped stream** (ADR-003 #5). A small worker job `devpreview.sync` (debounced 300 ms) re-renders platform files on `plan.updated`, collects changed paths and calls `PUT /sessions/:id/files`. Theme switches therefore reach phones as a `theme/themes.ts` change.
 
@@ -104,13 +104,13 @@ app/(public)/preview/[projectId]/page.tsx                        (Path C)
 ## API surface
 | Method | Path | Auth | Request → Response |
 |---|---|---|---|
-| POST | `/api/projects/:id/device-preview` | viewer | → `202 { sessionId }`, then `device.ready {url}` on the project stream · `429` over caps |
-| GET | `/api/projects/:id/device-preview` | viewer | → `{ session: {status, url, devices, expiresAt} \| null, mode }` |
+| POST | `/api/projects/:id/device-preview` | viewer | → `202 { sessionId }`, then `device.ready {sessionId}` on the project stream (no URL) · `429` over caps |
+| GET | `/api/projects/:id/device-preview` | viewer | → `{ session: {status, url?, devices, expiresAt} \| null, mode }`; `url` for current members only; never on the stream |
 | POST | `/api/projects/:id/device-preview/:sid/heartbeat` | viewer (session owner) | → `204` |
 | DELETE | `/api/projects/:id/device-preview/:sid` | viewer (session owner) | → `204` |
 | POST | `/api/projects/:id/preview-link` | viewer | → `{ url, expiresAt }` (≤ 1 h) |
-| POST | `/api/projects/:id/snack` | editor | Path A only → `{ runId }` (explicit public save) |
-| Sandbox (internal) | `POST /sessions`, `PUT /sessions/:id/files`, `GET /sessions/:id/status`, `DELETE /sessions/:id` | HMAC per-job token | as in step 2 |
+| POST | `/api/projects/:id/snack` | owner | Path A only → `{ runId }` (explicit public save; it publishes the code, so it follows the visibility rule in `08` §2) |
+| Sandbox (internal) | `POST /sessions`, `PUT /sessions/:id/files`, `GET /sessions/:id/status`, `DELETE /sessions/:id` | signed per-job token | as in step 2 |
 
 ## Acceptance checklist
 - [ ] Scanning the QR with **store Expo Go (SDK 58)** on iOS and Android opens the generated app. Navigation, the shared tab bar, add/edit/delete and theme all work.
@@ -141,7 +141,7 @@ Read first:
 
 Implement, one commit per step in the phase doc:
 1. materialize target "devserver" (full Expo project tarball → storage, signed URL).
-2. sandbox/devserver: sessions API (HMAC per-job token), prebuilt node_modules cache, expo start
+2. sandbox/devserver: sessions API (signed per-job token, per-session isolation, proxy path allowlist), prebuilt node_modules cache, expo start
    WITHOUT CI=1, the S3-chosen exposure mechanism, file sync → Fast Refresh, status/devices/logs,
    idle + hard-max lifecycle, capacity caps. The sandbox has no secrets and no DB access.
 3. Platform: device_sessions table, start/heartbeat/stop routes, devpreview.start/sync jobs fed by
@@ -161,6 +161,6 @@ Finish with lint, typecheck, tests, and a summary.
 - **Don't set `CI=1`** for the dev server. It disables Metro reloads, so phones stop updating (verify in S3).
 - **Prebuilt `node_modules` per template version** keeps session start fast (target < 20 s to a QR) and prevents installing anything the agent could influence.
 - **Metro memory** is roughly 300–600 MB per session. Size the sandbox and caps from S3 measurements.
-- **Session URLs are capabilities.** Expo Go can't send auth headers, so the URL itself grants access. Keep it random, short-lived and session-scoped, and never log it in client-visible places.
+- **Session URLs are capabilities.** Expo Go can't send auth headers, so the URL itself grants access. Keep it random (≥ 128 bits), short-lived and session-scoped, never log it, never put it on the project stream or in `run_events`, and return it only from the member-authorized GET. Removing a member restarts the project's session with a new URL (`08` §2).
 - **Backend config (Phase 13):** the tarball gets the same `lib/backend/config.ts` as the export, so phones talk to the real backend (or the platform gateway) once it's connected. Only public config is included.
 - **Path A, if enabled later:** keep the router shim in sync with the router API the generator rules allow (`05` §5), and anonymous saved snacks are public by URL.

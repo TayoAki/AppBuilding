@@ -113,3 +113,26 @@ Decisions (each closes a review finding; phase docs follow these):
 - Concurrency 2 fan-out uses a join counter in `runs.steps`.
 - Image pricing: generate/transform 4 credits, background removal 1, replace free. Free plans use placeholders.
 - Canonical env names: `SANDBOX_URL`, `SANDBOX_TOKEN_SECRET`, `DEVICE_PREVIEW_MODE`, `DEVICE_PREVIEW_BASE_DOMAIN`, `EMAIL_PROVIDER_API_KEY`, `EMAIL_FROM`, `SMTP_URL` (dev/Mailpit). The signup email hash is peppered with `BETTER_AUTH_SECRET`.
+
+### ADR-005 — Fixes from the security design review (2026-11-12)
+A design-level security review of the plan (no code exists yet) found places where the plan, built as written, would let one person cross into another's data, credentials or credits. `08-security.md` is now the authoritative source for these rules; phase docs were brought in line with it.
+
+1. **Remix copies files only.** No chat, no `messages.payload.api`, no uploaded assets. `payload.api` is never sent to a client or copied between projects (`08` §2, Phase 17).
+2. **Visibility never opens the workspace.** `public` / `unlisted` are served only by the Phase 17 public endpoints, which also check `deleted_at` (`08` §2, Phases 14, 17).
+3. **Child ids are bound to their project** on every route (`08` §2).
+4. **Verified email is required** to sign in, to hold a membership and to receive a share. Invite tokens are single-use, 7-day, bound to email and role. Share-by-email gives the same answer whether or not the account exists (Phases 02, 14).
+5. **Server-owned user fields** (`plan`, credits, `role`) are `input: false`; admin is granted only by script (Phase 02).
+6. **Generated code never runs on, or same-site with, the platform origin.** Runtime responses carry a `sandbox` CSP header; the runtime loads by URL, not `srcdoc`; `PREVIEW_ORIGIN` and `DEVICE_PREVIEW_BASE_DOMAIN` are on a separate registrable domain; `harness.html` ships only in the sandbox image; `img-src` is a host list (`08` §4, `07` §6, Phases 07, 11, 19a).
+7. **Supersedes the ADR-004 clarification of ADR-003 #18.** The sandbox receives **no** user token. Credentialed `eas-cli` steps run in a new **runner** service, one fresh container per job, which never runs generated code. Web publish is split into export (sandbox, no token) and deploy (runner, static `dist/` only). Spikes S4 and S5 confirm that `eas build` and `eas deploy` execute no project module (`08` §5, Phases 15, 16, 00b).
+8. **Job tokens are asymmetric.** `SANDBOX_SIGNING_KEY` (worker) and `SANDBOX_VERIFY_KEY` (sandbox, runner) replace `SANDBOX_TOKEN_SECRET` from ADR-004; `RUNNER_URL` is new. No callbacks into the worker. Jobs and sessions are isolated from each other; egress is restricted; paths are re-validated at unpack.
+9. **Device-preview URLs** are never put on the event stream, and the proxy forwards only the paths Expo Go needs (Phase 11).
+10. **GitHub calls use the acting user's token only**; `installation_id` from a callback is ignored and the target repo is re-checked (`08` §3, Phase 14).
+11. **Backend:** always the owner's provider connection and the stored `external_project_id`; provisioning and setup are owner-only; `shared` takes effect only after the owner confirms it (`project_backends.confirmed_shared`); row-level security is forced on every `app_*` table; identifiers are regex-checked and quoted (`08` §8, Phase 13).
+12. **Gateway mode** rate-limits token issuance, enforces quotas, signs tokens with a per-project key, and never reads platform cookies (Phase 13).
+13. **The model can't spend credits or change exposure by itself.** `confirm_plan` only highlights the button; `update_app` above 11 credits or with an added screen needs a click bound to the change's hash; `setup_backend` only proposes (`05` §3.3, Phases 06, 09, 13).
+14. **Credits:** confirm is a compare-and-set with reference `charge:build:<planMessageId>`; images in change rounds are charged; refunds return to the balance they came from; cancel refunds only unstarted steps; editors have a `daily_credit_cap`; `DAILY_SPEND_CAP_USD` and a daily message quota are enforced from Phase 06; signup grants use a canonical email (`08` §7, `11` §3, Phases 02, 06, 18).
+15. **Stripe:** grants need `amount_paid > 0` and our own customer mapping; refunds and disputes claw back; the worker holds `STRIPE_SECRET_KEY` (`08` §9, Phases 18, 19a).
+16. **EAS webhook:** the secret is looked up by the projectId in the URL before the body is parsed, and the build must belong to that project (`08` §9, Phase 15).
+17. **Smaller items:** ciphertexts are bound to their row and column; server-side image fetches are restricted; chat markdown renders without raw HTML or remote images; reports don't delist; "Export my data" emails no download link; the secret scanner covers more key formats and runs on every publicly served snapshot; state-changing routes check `Origin`.
+
+Consequences: one more deployable (the runner) and one more domain to buy. Add about 1.5 days across Phases 07, 11 and 16 for the header, proxy allowlist and export/deploy split, and extend the pentest pass in `08` §10 accordingly.

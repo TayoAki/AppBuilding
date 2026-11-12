@@ -54,6 +54,8 @@ Routes: `screenRoute(id)` maps a plan screen to `/(tabs)/<id>` or `/<id>`. The f
 
 ## 3. Ownership (enforced by `lib/vfs` + validators)
 
+Route files that would run in Node (`+api`, `+html`, `+middleware`, any name containing `+`) are rejected for every author, and paths are checked again whenever files are written to a real disk (`08` §5).
+
 | Path | Generators | Inline editor / user | Notes |
 |---|---|---|---|
 | `app/(tabs)/<id>.tsx`, `app/<id>.tsx` | Screen Builder | ✅ (splice edits) | |

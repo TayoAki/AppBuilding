@@ -6,10 +6,10 @@
 | Branch | `feat/08-app-generation-and-themes` |
 | Depends on | Phase 05 (jobs, step chaining), Phase 06 (Planner, confirmed plan), Phase 07 (template, renderers, VFS, preview runtime) |
 | Effort (solo dev + Claude Code) | ~6–8 days (was 5–7; adds the sandbox service skeleton for smoke renders, ADR-003 #18), plus ongoing prompt tuning with evals |
-| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; with `2`, the reference screen is built alone first, then the rest two at a time; ADR-003 #11). `SANDBOX_URL`, `SANDBOX_TOKEN_SECRET` (worker → sandbox service). `AI_BUILDER_MODEL` exists from Phase 06. |
+| New env vars | `AGENT_SCREEN_CONCURRENCY` (default `1`; with `2`, the reference screen is built alone first, then the rest two at a time; ADR-003 #11). `SANDBOX_URL`, `SANDBOX_SIGNING_KEY` (worker) and `SANDBOX_VERIFY_KEY` (sandbox) for signed per-job tokens (`08` §5). `AI_BUILDER_MODEL` exists from Phase 06. |
 
 ## Goal
-When the plan is confirmed (button or `confirm_plan`), a chain of `agent.step` jobs turns it into a working Expo app (`05-ai-agent-design.md` §4.1):
+When the plan is confirmed (the Confirm & build button), a chain of `agent.step` jobs turns it into a working Expo app (`05-ai-agent-design.md` §4.1):
 1. **Foundation** returns JSON. The platform turns it into 5 themes (with derived tokens and fixed contrast) plus the app's collections and sample records.
 2. **Component Designer** returns 5–10 shared components.
 3. **Screen Builder** writes one streamed `.tsx` per screen.
@@ -59,7 +59,7 @@ foundation → components → screen:<referenceScreenId> → screen:<rest, in pl
 ### 4. Foundation step
 - Schema `FoundationSchema = { themes: Theme[5], collections: Collection[] }` (base tokens per theme; `Collection` per `06` §6).
 - Request: app name, tagline, summary, target users, confirmed design, screens with purposes and key elements.
-- Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names, `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again").
+- Validate: exactly 5 themes, the first matching `plan.design`, at least one in the opposite mode, distinct names; collections with valid names (collection and field names match `^[a-z][a-zA-Z0-9]{0,40}$` and aren't SQL reserved words; `typeName` is a PascalCase identifier; `08` §6), `typeName`, field types and `references` to existing collections, 5–8 records each with ids and a value for every field of the right type, and no `id`/`createdAt`/`updatedAt` fields. On problems, one repair ("These have problems: … Write the complete JSON again").
 - Then the platform: `deriveThemePackage()` (full tokens + contrast + tinted neutrals) → `projects.plan.themePackage = {themes, activeThemeId: themes[0].id}`, `projects.plan.collections = …` → re-render `theme/themes.ts`, `data/schema.ts`, `data/seed.ts` → emit `theme.ready`, `plan.updated`.
 - Images (ADR-002, `11` §3): **Free projects always use placeholder URLs.** When `IMAGEKIT_ENABLED` and the project owner is on Pro, image fields may use generation URLs: at most 8 per build across all steps, each charged 4 credits and included in the build estimate (Phase 18). The wait-and-store post-processing is Phase 12; until then everything uses placeholders.
 
@@ -88,7 +88,7 @@ Per `05` §6:
 Output `{problems: Issue[], warnings: Issue[]}` → compact text (≤ ~4 KB) for repair prompts, plus a `validation.result` event. Unit tests: one broken-on-purpose fixture file per rule.
 
 ### 8. Render smoke test (`worker/agent/smoke.ts`)
-At `finish`, the worker calls the **sandbox service** (ADR-003 #18): `POST $SANDBOX_URL/render` with a per-job HMAC token (`SANDBOX_TOKEN_SECRET`) and a signed storage URL of the materialized `preview` target. The sandbox service has no DB access and no platform secrets, runs non-root with an env allowlist, and restricts egress where the host allows. It serves the bundled `public/preview-runtime/` from a local static server, loads `harness.html` in Playwright + Chromium, renders each route and returns the collected `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
+At `finish`, the worker calls the **sandbox service** (ADR-003 #18): `POST $SANDBOX_URL/render` with a signed per-job token (Ed25519: the worker signs with `SANDBOX_SIGNING_KEY`, the sandbox verifies with `SANDBOX_VERIFY_KEY`; `08` §5) and a signed storage URL of the materialized `preview` target. The sandbox service has no DB access and no platform secrets, runs non-root with an env allowlist, isolates each job, and restricts egress (`08` §5). It serves the bundled preview runtime from a local static server, loads `harness.html` in Playwright + Chromium, renders each route and returns the collected `runtime.error`s. A screen that throws gets **one** repair with the runtime error text, then is re-validated and re-rendered. If it still fails, it's marked `error` as in step 6. Cap the total smoke time at 60 s.
 
 ### 9. Theme picker + `set_theme`
 - **Theme dropdown** centered at the top of the canvas (where the reference app put it): theme names with swatches, the active one checked.

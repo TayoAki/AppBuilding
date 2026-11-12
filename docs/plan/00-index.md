@@ -19,7 +19,7 @@ It's based on a review of the TubeGuruji course *"Build Lovable for Mobile Apps 
 | File | What it covers |
 |---|---|
 | [01-video-review.md](01-video-review.md) | Review of the source video: feature inventory, 17 problems and our fixes, effort reality check |
-| [02-architecture.md](02-architecture.md) | Components (web, worker, **sandbox service**, Postgres, storage), key decisions A1–A11, request flows, repo layout, environments |
+| [02-architecture.md](02-architecture.md) | Components (web, worker, **sandbox service**, **runner service**, Postgres, storage), key decisions A1–A13, request flows, repo layout, environments |
 | [03-data-model.md](03-data-model.md) | Every platform table with columns, indexes, ownership |
 | [04-tech-stack.md](04-tech-stack.md) | Chosen libraries/vendors + alternatives; canonical env var list |
 | [05-ai-agent-design.md](05-ai-agent-design.md) | Planner + single-purpose generators, model config, tools, append-only prompt layout, pipelines, validation + repair, caching, event catalogue |

@@ -45,17 +45,18 @@ All prices live in `lib/credits/plans.ts`. The pricing page, upgrade dialogs and
 | Round of changes (one `update_app` that edits existing screens/components) | **5** for up to 2 regenerated files, **+3 per additional file** (`lib/credits/price.ts`, unit-tested; the tool result tells the Planner the charge) |
 | AI image generated or transformed in edit mode (Pro) | **4** (≈ $0.12 cost per generation, `15` §5) |
 | AI images during a build (Pro only, ≤ 8 per build, ≤ 4 per screen) | **4 each**, included in the build estimate shown on the Confirm button |
+| AI images during a round of changes (Pro only, ≤ 4 per round) | **4 each**, charged for the generation URLs actually kept after post-processing; a daily per-user image cap applies |
 | Background removal on an image (`e-bgremove`, 10 units) | **1** |
 | Replace an image with an upload or URL | **free** |
 | Images on Free plans | placeholders only, **free** |
-| Chat, planning, plan revisions, theme switches, inline visual edits, code saves | **free** |
+| Chat, planning, plan revisions, theme switches, inline visual edits, code saves | **free**, within a daily quota of 100 Planner messages per user (then 1 credit per message) and the `DAILY_SPEND_CAP_USD` model-spend cap (`08` §7) |
 | Minimum balance to send the Planner a message | **5** |
 
 Mechanics (Phase 18):
-- **Two balances.** `monthly_credits_balance` (Pro allowance, spent first, replaced at renewal, zeroed when Pro ends) and `credits_balance` (never expires: signup grant, refunds, top-ups). Each equals the sum of its own ledger rows.
+- **Two balances.** `monthly_credits_balance` (Pro allowance, spent first, replaced at renewal, zeroed when Pro ends) and `credits_balance` (never expires: signup grant, top-ups, and refunds of charges that came from it). **A refund returns to the balance it was charged from**; a monthly refund after the period ended is dropped, so failed runs can't turn expiring credits into permanent ones. Each equals the sum of its own ledger rows.
 - **Charge flow (transactional outbox, ADR-003 #7).** Generate the `runId` first. Then, in **one transaction** on the web's DB connection:
   1. conditional `UPDATE … SET monthly = monthly − x, credits = credits − y WHERE monthly + credits >= cost` (monthly first). Zero rows means "not enough credits", and the transaction rolls back.
-  2. ledger row(s) with reference `charge:<runId>`;
+  2. ledger row(s) with reference `charge:<runId>` (`charge:build:<planMessageId>` for a first build, so one plan is charged once), enforcing the member's `daily_credit_cap` when the actor isn't the owner;
   3. insert the run with `credits_charged`;
   4. insert the `job_outbox` row.
   The worker's dispatcher sends the outbox row to pg-boss after commit. Two tabs can't overspend, and a crash can't leave a charge without a run or a run without a job. Tools pre-check only so the Planner can explain a refusal; the charge decides.
